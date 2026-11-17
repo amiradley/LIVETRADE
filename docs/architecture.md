@@ -36,6 +36,12 @@ Future-dated tick timestamps are intentionally rejected. MT5/broker server clock
 
 The current MetaQuotes-Demo observation measured a stable two-hour offset: raw tick and M1 candle epochs both converted to UTC were two hours ahead of the Python UTC clock, while Windows local time was UTC+08:00. The scanner can therefore be run with `--broker-server-offset-hours 2` for this verified terminal context; leaving the option at its default of zero preserves strict rejection until the offset is verified again.
 
+## Phase 2.2 technical-analysis foundation
+
+`TechnicalAnalyzer` operates only on validated numerical OHLC candles. It calculates SMA 20/50, EMA 9/20/50, RSI 14, MACD 12/26/9, ATR 14, ATR percentage, candle range, and recent volatility change. It detects only rule-based engulfing, hammer, shooting-star, doji, and strong-candle formations with numerical evidence. It also reports measurable higher/lower structure, support/resistance, breakouts, false breakouts, multi-timeframe agreement, and a provisional technical score with factor contributions.
+
+The score is a research measurement, not a probability of profit and not an execution permission. Insufficient history, invalid OHLC values, NaN, and infinite values remain explicit data-quality failures. Technical records are deduplicated by symbol, timeframe, and source-candle timestamp.
+
 ## Profit Allocation Manager — planned accounting boundary
 
 The future manager is an accounting ledger only. It allocates 20% of eligible cumulative realised net profit to a savings reserve and retains 80% as trading capital. It excludes unrealised P&L, deposits, borrowed funds, and duplicate broker deals. Losses reduce cumulative profitability and must be recovered before new allocations become eligible.

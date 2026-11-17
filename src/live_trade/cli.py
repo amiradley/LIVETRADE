@@ -6,10 +6,12 @@ import logging
 from typing import Sequence
 
 from .config import Settings, load_settings
+from .diagnostics import build_rejection_report
 from .logging_config import configure_logging
 from .mt5_client import ReadOnlyMt5Client
 from .scanner import MarketScanner, ScannerConfig
 from .storage import MarketDataStore
+from .technical import TechnicalAnalyzer, analyze_multi_timeframe
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -37,6 +39,11 @@ def _parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Explicit verified MT5 server-to-UTC offset; default 0 rejects future timestamps",
     )
+
+    analyze = subparsers.add_parser("analyze", help="Analyse numerical OHLC data without trading")
+    analyze.add_argument("--symbol", required=True)
+    analyze.add_argument("--timeframe", action="append", choices=ReadOnlyMt5Client.TIMEFRAMES)
+    analyze.add_argument("--bars", type=int, default=200)
     return parser
 
 
@@ -82,6 +89,7 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
             )
             scan_run = MarketScanner(client, config).scan(tuple(args.symbol) if args.symbol else None)
             scan_id = MarketDataStore(settings.db_path).save_scan(scan_run)
+            report = build_rejection_report(scan_run)
             _print_json(
                 {
                     "scan_id": scan_id,
@@ -91,6 +99,34 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
                     "activated_count": sum(result.activated for result in scan_run.results),
                     "timeframes": config.timeframes,
                     "broker_server_offset_hours": args.broker_server_offset_hours,
+                    "rejection_report": report.to_dict(),
+                }
+            )
+        elif args.command == "analyze":
+            timeframes = tuple(args.timeframe or ReadOnlyMt5Client.TIMEFRAMES)
+            candles_by_timeframe = {}
+            unavailable = {}
+            for timeframe in timeframes:
+                try:
+                    candles_by_timeframe[timeframe] = client.get_candles(args.symbol.upper(), timeframe, args.bars)
+                except Exception as exc:
+                    unavailable[timeframe] = str(exc)
+            analyzer = TechnicalAnalyzer()
+            analyses = {
+                timeframe: analyzer.analyze(args.symbol.upper(), timeframe, candles)
+                for timeframe, candles in candles_by_timeframe.items()
+            }
+            multi_timeframe = analyze_multi_timeframe(args.symbol.upper(), candles_by_timeframe, analyzer)
+            store = MarketDataStore(settings.db_path)
+            analysis_ids = [store.save_technical_analysis(analysis) for analysis in analyses.values()]
+            multi_timeframe_id = store.save_multi_timeframe_analysis(multi_timeframe)
+            _print_json(
+                {
+                    "symbol": args.symbol.upper(),
+                    "analysis_ids": analysis_ids,
+                    "multi_timeframe_id": multi_timeframe_id,
+                    "unavailable_timeframes": unavailable,
+                    "analysis": multi_timeframe.to_dict(),
                 }
             )
         return 0

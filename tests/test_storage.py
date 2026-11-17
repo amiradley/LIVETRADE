@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from live_trade.models import Candle, MarketSnapshot, Tick
 from live_trade.scanner import ScanResult, ScanRun
 from live_trade.storage import MarketDataStore
+from live_trade.technical import TechnicalAnalyzer
 
 
 def test_snapshot_is_persisted(tmp_path):
@@ -84,3 +85,26 @@ def test_scan_is_persisted(tmp_path):
         "activated_count": 1,
         "result_count": 1,
     }
+
+
+def test_technical_analysis_deduplicates_source_candle(tmp_path):
+    candles = tuple(
+        Candle(
+            symbol="EURUSD",
+            timeframe="M1",
+            time=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=index),
+            open=1.0 + index * 0.01,
+            high=1.02 + index * 0.01,
+            low=0.99 + index * 0.01,
+            close=1.01 + index * 0.01,
+            tick_volume=100,
+        )
+        for index in range(60)
+    )
+    analysis = TechnicalAnalyzer().analyze("EURUSD", "M1", candles)
+    store = MarketDataStore(tmp_path / "market.sqlite3")
+
+    first_id = store.save_technical_analysis(analysis)
+    second_id = store.save_technical_analysis(analysis)
+
+    assert first_id == second_id

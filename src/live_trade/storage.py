@@ -7,6 +7,7 @@ from typing import Any
 
 from .models import MarketSnapshot
 from .scanner import ScanRun
+from .technical import MultiTimeframeAnalysis, TechnicalAnalysis
 
 
 SCHEMA = """
@@ -79,6 +80,31 @@ CREATE TABLE IF NOT EXISTS scan_results (
     effective_tick_time TEXT,
     timestamp_offset_seconds REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (scan_id, symbol)
+);
+CREATE TABLE IF NOT EXISTS technical_analysis (
+    analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    analysis_time TEXT NOT NULL,
+    source_candle_time TEXT NOT NULL,
+    data_quality TEXT NOT NULL,
+    indicator_json TEXT NOT NULL,
+    patterns_json TEXT NOT NULL,
+    structure_json TEXT NOT NULL,
+    technical_score REAL,
+    score_breakdown_json TEXT NOT NULL,
+    UNIQUE (symbol, timeframe, source_candle_time)
+);
+CREATE TABLE IF NOT EXISTS multi_timeframe_analysis (
+    analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    analysis_time TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    agreement TEXT NOT NULL,
+    technical_score REAL,
+    score_breakdown_json TEXT NOT NULL,
+    timeframe_json TEXT NOT NULL,
+    UNIQUE (symbol, analysis_time)
 );
 """
 
@@ -235,3 +261,57 @@ class MarketDataStore:
                 "activated_count": int(run[2]),
                 "result_count": int(result_count),
             }
+
+    def save_technical_analysis(self, analysis: TechnicalAnalysis) -> int:
+        payload = analysis.to_dict()
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO technical_analysis "
+                "(symbol, timeframe, analysis_time, source_candle_time, data_quality, "
+                "indicator_json, patterns_json, structure_json, technical_score, score_breakdown_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    analysis.symbol,
+                    analysis.timeframe,
+                    analysis.analysis_time.isoformat(),
+                    analysis.source_candle_time.isoformat(),
+                    analysis.data_quality,
+                    json.dumps(payload["indicator_values"], default=str),
+                    json.dumps(payload["patterns"], default=str),
+                    json.dumps(payload["structure"], default=str),
+                    analysis.technical_score,
+                    json.dumps(payload["score_breakdown"], default=str),
+                ),
+            )
+            row = connection.execute(
+                "SELECT analysis_id FROM technical_analysis "
+                "WHERE symbol = ? AND timeframe = ? AND source_candle_time = ?",
+                (analysis.symbol, analysis.timeframe, analysis.source_candle_time.isoformat()),
+            ).fetchone()
+            assert row is not None
+            return int(row[0])
+
+    def save_multi_timeframe_analysis(self, analysis: MultiTimeframeAnalysis) -> int:
+        payload = analysis.to_dict()
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO multi_timeframe_analysis "
+                "(symbol, analysis_time, direction, agreement, technical_score, "
+                "score_breakdown_json, timeframe_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    analysis.symbol,
+                    analysis.analysis_time.isoformat(),
+                    analysis.direction,
+                    analysis.agreement,
+                    analysis.technical_score,
+                    json.dumps(payload["score_breakdown"], default=str),
+                    json.dumps(payload["timeframes"], default=str),
+                ),
+            )
+            row = connection.execute(
+                "SELECT analysis_id FROM multi_timeframe_analysis "
+                "WHERE symbol = ? AND analysis_time = ?",
+                (analysis.symbol, analysis.analysis_time.isoformat()),
+            ).fetchone()
+            assert row is not None
+            return int(row[0])
