@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "live-trade"
+version = "0.1.0"
+description = "Read-only MetaTrader 5 market-data foundation for LIVE TRADING"
+requires-python = ">=3.11"
+dependencies = [
+    "MetaTrader5>=5.0.45",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+live-trade = "live_trade.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
