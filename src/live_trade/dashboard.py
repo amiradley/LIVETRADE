@@ -17,6 +17,7 @@ from .config import Settings
 from .finance import FinancialDataService, FinancialSnapshot
 from .intelligence import FinancialIntelligenceService, FinancialIntelligenceSnapshot
 from .mt5_client import ReadOnlyMt5Client
+from .research import ResearchWorker
 from .session import SessionError, SessionMode, SessionState, TradingSessionController
 from .storage import MarketDataStore
 
@@ -171,7 +172,7 @@ def _snapshot_payload(
     }
 
 
-def _session_payload(status: Any) -> dict[str, Any]:
+def _session_payload(status: Any, components: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "state": status.state.value,
         "mode": status.mode.value,
@@ -179,17 +180,26 @@ def _session_payload(status: Any) -> dict[str, Any]:
         "changed_at": _iso(status.changed_at),
         "message": status.message,
         "checks": [asdict(check) for check in status.checks],
+        "components": components or {},
     }
 
 
 class DashboardService:
     """Application read model and safe session facade for the local dashboard."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, client: Any | None = None) -> None:
         self.settings = settings
-        self.client = ReadOnlyMt5Client(mt5_path=settings.mt5_path)
+        self.client = client or ReadOnlyMt5Client(mt5_path=settings.mt5_path)
         self.financial = FinancialDataService(self.client)
         self.store = MarketDataStore(settings.db_path)
+        self.lock = threading.RLock()
+        self.client_lock = threading.RLock()
+        self.research_worker = ResearchWorker(
+            self.client,
+            self.store,
+            settings.symbols[0] if settings.symbols else "EURUSD",
+            self.client_lock,
+        )
         self.intelligence = FinancialIntelligenceService(self.store)
         self.controller = TradingSessionController(
             self.client,
@@ -197,12 +207,16 @@ class DashboardService:
             self.store,
             mode=SessionMode.DEMO_SHADOW,
             market_symbol=(settings.symbols[0] if settings.symbols else "EURUSD"),
+            research_worker=self.research_worker,
         )
-        self.lock = threading.RLock()
         self.last_successful: dict[str, Any] | None = None
         self.last_error: str | None = None
 
     def _capture_live(self) -> dict[str, Any]:
+        with self.client_lock:
+            return self._capture_live_locked()
+
+    def _capture_live_locked(self) -> dict[str, Any]:
         owns_connection = self.controller.status.state is not SessionState.RUNNING
         if owns_connection:
             self.client.connect()
@@ -228,7 +242,7 @@ class DashboardService:
                 "financial": financial,
                 "history": _history_payload(intelligence),
                 "snapshot_id": snapshot_id,
-                "session": _session_payload(self.controller.status),
+                "session": _session_payload(self.controller.status, self.controller.component_health()),
             }
             self.last_successful = payload
             self.last_error = None
@@ -244,6 +258,8 @@ class DashboardService:
             except Exception as exc:
                 self.last_error = str(exc)
                 LOGGER.warning("Dashboard live financial refresh failed: %s", exc)
+                if self.controller.status.state is SessionState.RUNNING:
+                    self.controller.mark_error(str(exc))
                 if self.last_successful is not None:
                     stale = json.loads(json.dumps(self.last_successful, default=str))
                     stale["connection"].update(
@@ -273,7 +289,7 @@ class DashboardService:
                     ]
                     if stale.get("history"):
                         stale["history"]["status"] = "STALE"
-                    stale["session"] = _session_payload(self.controller.status)
+                    stale["session"] = _session_payload(self.controller.status, self.controller.component_health())
                     return stale
                 return {
                     "connection": {
@@ -286,7 +302,7 @@ class DashboardService:
                     "terminal": {},
                     "financial": None,
                     "snapshot_id": None,
-                    "session": _session_payload(self.controller.status),
+                    "session": _session_payload(self.controller.status, self.controller.component_health()),
                 }
 
     def start(self) -> dict[str, Any]:
@@ -303,7 +319,7 @@ class DashboardService:
                     "financial": payload,
                     "history": _history_payload(intelligence),
                     "snapshot_id": snapshot_id,
-                    "session": _session_payload(status),
+                    "session": _session_payload(status, self.controller.component_health()),
                 }
             return self.overview()
 
@@ -313,13 +329,13 @@ class DashboardService:
             payload = self.overview() if status.state is not SessionState.STOPPED else self.last_successful
             if payload is None:
                 payload = self.overview()
-            payload["session"] = _session_payload(status)
+            payload["session"] = _session_payload(status, self.controller.component_health())
             return payload
 
     def status(self) -> dict[str, Any]:
         with self.lock:
             return {
-                "session": _session_payload(self.controller.status),
+                "session": _session_payload(self.controller.status, self.controller.component_health()),
                 "last_error": self.last_error,
                 "last_successful_update": (
                     self.last_successful.get("connection", {}).get("last_successful_update")
@@ -444,7 +460,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send(self.service.stop())
             return self._send({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except SessionError as exc:
-            self._send({"error": str(exc), "session": _session_payload(self.service.controller.status)}, HTTPStatus.CONFLICT)
+            self._send({"error": str(exc), "session": _session_payload(self.service.controller.status, self.service.controller.component_health())}, HTTPStatus.CONFLICT)
         except Exception as exc:
             LOGGER.exception("Dashboard command failed")
             self._send({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)

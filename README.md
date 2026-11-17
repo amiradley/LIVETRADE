@@ -77,6 +77,8 @@ The dashboard's START button begins only the verified research/demo-shadow workf
 
 Stage 1.6 adds read-only broker deal-history reconciliation, partial-close aggregation, a persistent 20% savings-reserve high-water-mark ledger, and USD/MYR conversion through the configured exchange-rate source. Broker currency values remain the source of truth; converted MYR values are labelled estimates and become unavailable if the rate is stale or cannot be retrieved. No withdrawal, transfer, or order API exists.
 
+Stage 1.6A adds end-to-end demo-shadow health reporting. START now starts the read-only scanner, closed-candle technical-analysis, and market-monitoring worker; STOP joins it before the final snapshot. Component cycle counts and thread liveness are exposed through `/api/status`, and MT5 failures transition the session to an explicit error/stale state.
+
 ## Tests
 
 ```powershell

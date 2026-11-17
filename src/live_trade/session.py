@@ -54,12 +54,14 @@ class TradingSessionController:
         store: Any,
         mode: SessionMode = SessionMode.RESEARCH,
         market_symbol: str = "EURUSD",
+        research_worker: Any | None = None,
     ) -> None:
         self.client = client
         self.financial_service = financial_service
         self.store = store
         self.mode = mode
         self.market_symbol = market_symbol
+        self.research_worker = research_worker
         self.status = SessionStatus(SessionState.STOPPED, mode, None, datetime.now(timezone.utc))
 
     def start(self) -> SessionStatus:
@@ -67,6 +69,7 @@ class TradingSessionController:
             raise SessionError(f"Cannot start while session is {self.status.state.value}")
         self.status = SessionStatus(SessionState.STARTING, self.mode, None, datetime.now(timezone.utc))
         checks: list[SessionCheck] = []
+        session_id: int | None = None
         try:
             self.client.connect()
             terminal = self.client.terminal_info()
@@ -99,13 +102,24 @@ class TradingSessionController:
                 "Research/demo-shadow session started; execution remains disabled.",
                 financial,
             )
+            if self.research_worker is not None:
+                self.research_worker.start()
             return self.status
         except Exception as exc:
+            if session_id is not None:
+                self.store.update_session(
+                    session_id,
+                    state=SessionState.ERROR.value,
+                    ending_balance=None,
+                    ending_equity=None,
+                    stopped_at=None,
+                    message=str(exc),
+                )
             self.client.disconnect()
             self.status = SessionStatus(
                 SessionState.ERROR,
                 self.mode,
-                None,
+                session_id,
                 datetime.now(timezone.utc),
                 tuple(checks),
                 str(exc),
@@ -115,12 +129,39 @@ class TradingSessionController:
             raise SessionError(str(exc)) from exc
 
     def stop(self) -> SessionStatus:
+        if self.status.state is SessionState.ERROR:
+            if self.research_worker is not None:
+                self.research_worker.stop()
+            self.client.disconnect()
+            if self.status.session_id is not None:
+                self.store.update_session(
+                    self.status.session_id,
+                    state=SessionState.STOPPED.value,
+                    ending_balance=None,
+                    ending_equity=None,
+                    stopped_at=datetime.now(timezone.utc),
+                    message="Session stopped after an integration error; no execution was enabled.",
+                )
+            self.status = SessionStatus(
+                SessionState.STOPPED,
+                self.mode,
+                self.status.session_id,
+                datetime.now(timezone.utc),
+                message="Session stopped after an integration error.",
+            )
+            return self.status
         if self.status.state not in {SessionState.RUNNING, SessionState.UNRESOLVED_POSITIONS}:
             raise SessionError(f"Cannot stop while session is {self.status.state.value}")
         self.status = SessionStatus(
             SessionState.STOPPING, self.mode, self.status.session_id, datetime.now(timezone.utc)
         )
-        financial = self.financial_service.capture()
+        if self.research_worker is not None:
+            self.research_worker.stop()
+        try:
+            financial = self.financial_service.capture()
+        except Exception as exc:
+            self.mark_error(str(exc))
+            raise SessionError(str(exc)) from exc
         if financial.positions:
             self.status = SessionStatus(
                 SessionState.UNRESOLVED_POSITIONS,
@@ -157,3 +198,40 @@ class TradingSessionController:
             financial=financial,
         )
         return self.status
+
+    def mark_error(self, message: str) -> SessionStatus:
+        if self.research_worker is not None:
+            self.research_worker.stop()
+        self.client.disconnect()
+        if self.status.session_id is not None:
+            self.store.update_session(
+                self.status.session_id,
+                state=SessionState.ERROR.value,
+                ending_balance=None,
+                ending_equity=None,
+                stopped_at=None,
+                message=message,
+            )
+        self.status = SessionStatus(
+            SessionState.ERROR,
+            self.mode,
+            self.status.session_id,
+            datetime.now(timezone.utc),
+            message=message,
+        )
+        return self.status
+
+    def component_health(self) -> dict[str, Any]:
+        if self.research_worker is None:
+            return {
+                "scanner": {"state": "NOT_CONFIGURED"},
+                "technical_analysis": {"state": "NOT_CONFIGURED"},
+                "market_monitoring": {"state": "NOT_CONFIGURED"},
+            }
+        worker = self.research_worker.health().to_dict()
+        state = worker["state"]
+        return {
+            "scanner": {**worker, "state": state},
+            "technical_analysis": {**worker, "state": state},
+            "market_monitoring": {**worker, "state": state},
+        }

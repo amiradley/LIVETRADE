@@ -48,6 +48,10 @@ The dashboard refreshes broker financial values through a short-lived MT5 read c
 
 `intelligence.py` obtains USD/MYR through the configured rate endpoint, records source and quote/retrieval dates, validates positive finite values, and reports `UNAVAILABLE` or `STALE` rather than falling back to an invented rate. The savings ledger is internal only: eligible cumulative realised net profit above the persisted high-water mark is split 20% reserve / 80% retained profit. Losses do not create allocations, and recovery must exceed the previous high-water mark before a new allocation is recorded.
 
+## Stage 1.6A health and runtime integration
+
+The demo-shadow START transition now owns a daemon research worker that runs the read-only scanner, closed-candle technical analysis, and market-monitoring cycle under a client lock. Component health exposes cycle count, thread liveness, last completion, and last error. STOP signals and joins the worker before the final financial snapshot; a failed active-session read transitions to `ERROR` and marks the persisted session record accordingly rather than claiming `RUNNING`. Broker timestamp offsets remain explicit scanner configuration; a zero default intentionally preserves future-tick rejection until a verified offset is supplied.
+
 ## Phase 2 scanner foundation
 
 `MarketScanner` is a read-only policy layer over the MT5 adapter. It discovers instruments, reads ticks, calculates spread in broker points, rejects stale or invalid data, labels a coarse UTC market session, progressively activates only the lowest-spread eligible candidates, retrieves configured OHLC timeframes, and persists a scan run plus per-symbol results. The scanner does not place orders and does not claim that eligibility implies profitability.

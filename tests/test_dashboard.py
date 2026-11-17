@@ -17,11 +17,7 @@ def test_dashboard_exposes_verified_financial_fields(tmp_path, fake_mt5, monkeyp
     from live_trade.mt5_client import ReadOnlyMt5Client
 
     monkeypatch.setenv("LIVE_TRADE_FX_URL", "http://127.0.0.1:1/unavailable")
-    service = DashboardService(dashboard_settings(tmp_path))
-    service.client = ReadOnlyMt5Client(api=fake_mt5)
-    service.financial.client = service.client
-    service.controller.client = service.client
-    service.controller.financial_service = service.financial
+    service = DashboardService(dashboard_settings(tmp_path), client=ReadOnlyMt5Client(api=fake_mt5))
 
     overview = service.overview()
 
@@ -37,11 +33,7 @@ def test_dashboard_start_stop_and_duplicate_prevention(tmp_path, fake_mt5, monke
     from live_trade.mt5_client import ReadOnlyMt5Client
 
     monkeypatch.setenv("LIVE_TRADE_FX_URL", "http://127.0.0.1:1/unavailable")
-    service = DashboardService(dashboard_settings(tmp_path))
-    service.client = ReadOnlyMt5Client(api=fake_mt5)
-    service.financial.client = service.client
-    service.controller.client = service.client
-    service.controller.financial_service = service.financial
+    service = DashboardService(dashboard_settings(tmp_path), client=ReadOnlyMt5Client(api=fake_mt5))
 
     started = service.start()
     assert started["session"]["state"] == SessionState.RUNNING.value
@@ -71,3 +63,39 @@ def test_dashboard_server_rejects_duplicate_bind(tmp_path, fake_mt5):
             raise AssertionError("duplicate dashboard bind must be rejected")
     finally:
         first.server_close()
+
+
+def test_dashboard_browser_refresh_preserves_session(tmp_path, fake_mt5, monkeypatch):
+    from live_trade.mt5_client import ReadOnlyMt5Client
+
+    monkeypatch.setenv("LIVE_TRADE_FX_URL", "http://127.0.0.1:1/unavailable")
+    service = DashboardService(dashboard_settings(tmp_path), client=ReadOnlyMt5Client(api=fake_mt5))
+    service.research_worker = None
+    service.controller.research_worker = None
+
+    started = service.start()
+    first = service.overview()
+    second = service.overview()
+
+    assert started["session"]["state"] == SessionState.RUNNING.value
+    assert first["session"]["state"] == SessionState.RUNNING.value
+    assert second["session"]["state"] == SessionState.RUNNING.value
+    assert first["session"]["session_id"] == second["session"]["session_id"]
+    service.stop()
+
+
+def test_dashboard_marks_running_session_error_after_mt5_failure(tmp_path, fake_mt5, monkeypatch):
+    from live_trade.mt5_client import ReadOnlyMt5Client
+
+    monkeypatch.setenv("LIVE_TRADE_FX_URL", "http://127.0.0.1:1/unavailable")
+    service = DashboardService(dashboard_settings(tmp_path), client=ReadOnlyMt5Client(api=fake_mt5))
+    service.research_worker = None
+    service.controller.research_worker = None
+    service.start()
+    fake_mt5.terminal_info = lambda: (_ for _ in ()).throw(RuntimeError("simulated MT5 disconnect"))
+
+    stale = service.overview()
+
+    assert stale["connection"]["status"] == "STALE"
+    assert stale["session"]["state"] == SessionState.ERROR.value
+    assert stale["session"]["message"] == "simulated MT5 disconnect"
