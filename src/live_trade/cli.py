@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from dataclasses import asdict
 from typing import Sequence
 
 from .config import Settings, load_settings
 from .logging_config import configure_logging
 from .mt5_client import ReadOnlyMt5Client
+from .scanner import MarketScanner, ScannerConfig
 from .storage import MarketDataStore
 
 
@@ -23,6 +23,14 @@ def _parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--symbol", action="append", help="Symbol; repeat for multiple symbols")
     snapshot.add_argument("--timeframe", default="M1", choices=ReadOnlyMt5Client.TIMEFRAMES)
     snapshot.add_argument("--bars", type=int, help="Number of candles per symbol")
+
+    scan = subparsers.add_parser("scan", help="Scan instruments without executing trades")
+    scan.add_argument("--symbol", action="append", help="Limit scan; repeat for multiple symbols")
+    scan.add_argument("--timeframe", action="append", choices=ReadOnlyMt5Client.TIMEFRAMES)
+    scan.add_argument("--bars", type=int, default=100)
+    scan.add_argument("--max-active", type=int, default=50)
+    scan.add_argument("--max-spread-points", type=float, default=30.0)
+    scan.add_argument("--max-tick-age", type=float, default=60.0)
     return parser
 
 
@@ -55,6 +63,26 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
                     "timeframe": args.timeframe,
                     "bars": args.bars or settings.default_bars,
                     "instrument_count": len(snapshot.instruments),
+                }
+            )
+        elif args.command == "scan":
+            config = ScannerConfig(
+                timeframes=tuple(args.timeframe or ("M1", "M5")),
+                bars=args.bars,
+                max_active_instruments=args.max_active,
+                max_spread_points=args.max_spread_points,
+                max_tick_age_seconds=args.max_tick_age,
+            )
+            scan_run = MarketScanner(client, config).scan(tuple(args.symbol) if args.symbol else None)
+            scan_id = MarketDataStore(settings.db_path).save_scan(scan_run)
+            _print_json(
+                {
+                    "scan_id": scan_id,
+                    "discovered_count": scan_run.discovered_count,
+                    "result_count": len(scan_run.results),
+                    "eligible_count": sum(result.eligible for result in scan_run.results),
+                    "activated_count": sum(result.activated for result in scan_run.results),
+                    "timeframes": config.timeframes,
                 }
             )
         return 0

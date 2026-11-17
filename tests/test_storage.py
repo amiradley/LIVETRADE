@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from live_trade.models import Candle, MarketSnapshot, Tick
+from live_trade.scanner import ScanResult, ScanRun
 from live_trade.storage import MarketDataStore
 
 
@@ -47,4 +48,39 @@ def test_snapshot_is_persisted(tmp_path):
         "instruments": 1,
         "ticks": 1,
         "candles": 1,
+    }
+
+
+def test_scan_is_persisted(tmp_path):
+    captured_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    scan = ScanRun(
+        started_at=captured_at,
+        completed_at=captured_at,
+        discovered_count=2,
+        results=(
+            ScanResult(
+                symbol="EURUSD",
+                captured_at=captured_at,
+                tick_time=captured_at,
+                bid=1.1,
+                ask=1.1002,
+                spread_points=20.0,
+                tick_age_seconds=0.0,
+                session="ASIA_PACIFIC",
+                eligible=True,
+                activated=True,
+                candle_counts={"M1": 1},
+                latest_candle_times={"M1": captured_at},
+            ),
+        ),
+    )
+    store = MarketDataStore(tmp_path / "market.sqlite3")
+
+    scan_id = store.save_scan(scan)
+
+    assert store.scan_counts(scan_id) == {
+        "discovered_count": 2,
+        "eligible_count": 1,
+        "activated_count": 1,
+        "result_count": 1,
     }

@@ -36,7 +36,10 @@ class FakeMt5:
         return {"login": 12345, "balance": 10000.0}
 
     def symbols_get(self):
-        return ({"name": "EURUSD", "visible": True}, {"name": "GBPUSD", "visible": True})
+        return (
+            {"name": "EURUSD", "visible": True, "point": 0.00001, "digits": 5, "trade_mode": 4},
+            {"name": "GBPUSD", "visible": True, "point": 0.00001, "digits": 5, "trade_mode": 4},
+        )
 
     def symbol_info_tick(self, symbol):
         return {

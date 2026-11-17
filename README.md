@@ -43,9 +43,12 @@ Set `MT5_PATH` in the environment only if the terminal is not discoverable by th
 python -m live_trade check
 python -m live_trade discover
 python -m live_trade snapshot --symbol EURUSD --timeframe M1 --bars 200
+python -m live_trade scan --symbol EURUSD --timeframe M1 --timeframe M5 --bars 100
 ```
 
 Repeat `--symbol` for additional instruments. Snapshot data is stored in `data/market_data.sqlite3`; structured logs are written to `logs/live_trade.jsonl`.
+
+The Phase 2 scanner evaluates all discovered instruments when no `--symbol` filter is provided, but only progressively activates the best candidates for detailed candle retrieval. It currently applies deterministic visibility, trade-mode, weekend-session, tick-freshness, point-size, and spread gates. It does not calculate indicators or execute trades yet.
 
 ## Tests
 

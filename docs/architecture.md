@@ -26,6 +26,14 @@ The future START flow must pass connectivity, account, market-data, risk, and re
 
 No session-controller or execution code is enabled in Phase 1.1.
 
+## Phase 2 scanner foundation
+
+`MarketScanner` is a read-only policy layer over the MT5 adapter. It discovers instruments, reads ticks, calculates spread in broker points, rejects stale or invalid data, labels a coarse UTC market session, progressively activates only the lowest-spread eligible candidates, retrieves configured OHLC timeframes, and persists a scan run plus per-symbol results. The scanner does not place orders and does not claim that eligibility implies profitability.
+
+The first scanner increment supports M1, M5, M15, M30, H1, H4, and D1 retrieval and stores candle counts/freshness. Technical indicators, chart-pattern evidence, and multi-timeframe ranking will be added as separate deterministic stages after this data-quality foundation.
+
+Future-dated tick timestamps are intentionally rejected. MT5/broker server clock offsets must be measured and supplied as explicit, audited configuration before any offset-aware activation is allowed; the scanner must not silently reinterpret timestamps.
+
 ## Profit Allocation Manager — planned accounting boundary
 
 The future manager is an accounting ledger only. It allocates 20% of eligible cumulative realised net profit to a savings reserve and retains 80% as trading capital. It excludes unrealised P&L, deposits, borrowed funds, and duplicate broker deals. Losses reduce cumulative profitability and must be recovered before new allocations become eligible.
