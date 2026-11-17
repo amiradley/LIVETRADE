@@ -34,6 +34,14 @@ No session-controller or execution code is enabled in Phase 1.1.
 
 The future dashboard will use this backend as a read model with exactly two primary controls, START and STOP. Emergency suspension, liquidation, deal-history reconciliation, and execution remain later explicitly authorized stages.
 
+## Stage 1.5 local dashboard
+
+The graphical dashboard is served by `live_trade dashboard` from a local Python `ThreadingHTTPServer` bound to `127.0.0.1`. Static HTML, CSS, and JavaScript provide the interface; no frontend build toolchain or extra runtime is required. The API delegates financial capture and session transitions to the existing read-only client, `FinancialDataService`, `TradingSessionController`, and `MarketDataStore`.
+
+The dashboard refreshes broker financial values through a short-lived MT5 read connection when stopped, and keeps the session controller's read-only connection while a demo-shadow session is running. Disconnections are surfaced as `DISCONNECTED` or `STALE`; the UI never presents a stale snapshot as live. Broker values, internal calculations, pending ledgers, and unavailable conversions are labelled separately. The local API exposes only GET read models plus the safe research/demo-shadow START and STOP transitions; it contains no order, deal, withdrawal, or transfer endpoint.
+
+`run_dashboard.cmd` calls `run_dashboard.ps1`. The launcher checks for a Low-integrity context and stops with an actionable message because MT5 IPC previously required a Medium-integrity Python process under the same user and Windows session. It does not elevate the process or change MT5 settings.
+
 ## Phase 2 scanner foundation
 
 `MarketScanner` is a read-only policy layer over the MT5 adapter. It discovers instruments, reads ticks, calculates spread in broker points, rejects stale or invalid data, labels a coarse UTC market session, progressively activates only the lowest-spread eligible candidates, retrieves configured OHLC timeframes, and persists a scan run plus per-symbol results. The scanner does not place orders and does not claim that eligibility implies profitability.

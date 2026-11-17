@@ -47,6 +47,7 @@ python -m live_trade scan --symbol EURUSD --timeframe M1 --timeframe M5 --bars 1
 python -m live_trade scan --symbol EURUSD --timeframe M1 --bars 10 --broker-server-offset-hours 2
 python -m live_trade analyze --symbol EURUSD --timeframe M1 --timeframe M5 --bars 200
 python -m live_trade financial
+python -m live_trade dashboard --open-browser
 ```
 
 Repeat `--symbol` for additional instruments. Snapshot data is stored in `data/market_data.sqlite3`; structured logs are written to `logs/live_trade.jsonl`.
@@ -58,6 +59,21 @@ The Phase 2 scanner evaluates all discovered instruments when no `--symbol` filt
 The `analyze` command runs the numerical technical-analysis foundation over OHLC candles and persists indicator, pattern, structure, score, and multi-timeframe records. Confirmed analysis excludes the current forming candle by default; use `--include-live-candle` only for explicitly provisional observations. It remains read-only and does not produce execution decisions.
 
 The `financial` command reads broker account and open-position information from MT5 and stores a local financial snapshot. It does not calculate or display invented currency conversions, and it does not place or close trades.
+
+## Graphical dashboard
+
+The Stage 1.5 dashboard is a local browser-based desktop interface. It uses the existing Python backend and SQLite store, binds only to `127.0.0.1`, and has no order-mutation API. It shows broker-verified account values, explicit data-quality labels, read-only positions, persisted scanner/analysis records, and the safe research/demo-shadow session controls.
+
+From a normal Windows PowerShell window running under the same user and session as MT5:
+
+```powershell
+Set-Location 'C:\Users\USER\Desktop\LIVE TRADE'
+& '.\.venv\Scripts\python.exe' -m live_trade dashboard --open-browser
+```
+
+For a desktop-style launch, double-click `run_dashboard.cmd`. The launcher refuses a Low-integrity context, warns if `terminal64.exe` is not running, and does not request Administrator privileges. A second dashboard instance is rejected if the default port is already in use.
+
+The dashboard's START button begins only the verified research/demo-shadow workflow. STOP ends that workflow without placing, modifying, or closing broker positions. Currency conversion to MYR, realised-deal history, profit allocation, and actual execution remain explicitly pending or unavailable until their later milestones.
 
 ## Tests
 

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LIVE TRADING</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">LT</span><div><strong>LIVE TRADING</strong><small>Research terminal</small></div></div>
+      <nav id="navigation" aria-label="Dashboard sections">
+        <button class="nav-item active" data-section="overview">Overview</button>
+        <button class="nav-item" data-section="live-trades">Live Trades</button>
+        <button class="nav-item" data-section="history">Trading History</button>
+        <button class="nav-item" data-section="analysis">AI Market Analysis</button>
+        <button class="nav-item" data-section="scanner">Market Scanner</button>
+        <button class="nav-item" data-section="financial">Financial Summary</button>
+        <button class="nav-item" data-section="settings">Settings</button>
+      </nav>
+      <div class="sidebar-note"><span class="dot"></span><span>Execution disabled<br><small>Research / demo-shadow only</small></span></div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div><p class="eyebrow">ACCOUNT MONITOR</p><h1 id="page-title">Overview</h1></div>
+        <div class="topbar-actions"><span id="connection-pill" class="status-pill neutral">Checking MT5…</span><button id="refresh-button" class="button secondary">Refresh</button></div>
+      </header>
+
+      <section class="session-banner">
+        <div><span class="eyebrow">SESSION</span><strong id="session-state">STOPPED</strong><span id="session-message">Ready for a safe research/demo-shadow session.</span></div>
+        <div class="session-actions"><button id="start-button" class="button primary">START</button><button id="stop-button" class="button danger">STOP</button></div>
+      </section>
+
+      <div id="error-banner" class="error-banner hidden"></div>
+
+      <section id="section-overview" class="page-section active">
+        <div class="section-heading"><div><p class="eyebrow">FINANCIAL CONDITION</p><h2>Your account at a glance</h2></div><span id="last-update" class="muted">No verified update yet</span></div>
+        <div class="metrics-grid" id="metrics-grid"></div>
+        <div class="content-grid two-columns">
+          <article class="panel"><div class="panel-heading"><h3>Account summary</h3><span id="account-quality" class="badge neutral">UNAVAILABLE</span></div><div id="account-summary" class="summary-list"></div></article>
+          <article class="panel"><div class="panel-heading"><h3>Plain-language summary</h3></div><div id="plain-summary" class="plain-summary"></div></article>
+        </div>
+      </section>
+
+      <section id="section-live-trades" class="page-section"><div class="section-heading"><div><p class="eyebrow">BROKER POSITIONS</p><h2>Live trades</h2></div><span class="muted">Read-only MT5 view</span></div><div id="positions-panel" class="panel"></div></section>
+      <section id="section-history" class="page-section"><div class="section-heading"><div><p class="eyebrow">VERIFIED DEALS</p><h2>Trading history</h2></div></div><div id="history-panel" class="panel"></div></section>
+      <section id="section-analysis" class="page-section"><div class="section-heading"><div><p class="eyebrow">TECHNICAL RESEARCH</p><h2>AI market analysis</h2></div><span class="muted">Numerical analysis only; not a profit probability</span></div><div id="analysis-panel" class="panel"></div></section>
+      <section id="section-scanner" class="page-section"><div class="section-heading"><div><p class="eyebrow">MARKET DATA</p><h2>Market scanner</h2></div></div><div id="scanner-panel" class="panel"></div></section>
+      <section id="section-financial" class="page-section"><div class="section-heading"><div><p class="eyebrow">ACCOUNTING PREPARATION</p><h2>Financial summary</h2></div></div><div id="financial-summary-panel" class="panel"></div></section>
+      <section id="section-settings" class="page-section"><div class="section-heading"><div><p class="eyebrow">SYSTEM</p><h2>Settings</h2></div></div><div id="settings-panel" class="panel settings-grid"></div></section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

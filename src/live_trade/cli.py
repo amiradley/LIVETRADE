@@ -7,6 +7,7 @@ from typing import Sequence
 
 from .config import Settings, load_settings
 from .diagnostics import build_rejection_report
+from .dashboard import serve_dashboard
 from .finance import FinancialDataService
 from .logging_config import configure_logging
 from .mt5_client import ReadOnlyMt5Client
@@ -51,6 +52,10 @@ def _parser() -> argparse.ArgumentParser:
         help="Include the current forming candle as provisional analysis",
     )
     subparsers.add_parser("financial", help="Read and persist broker financial information")
+    dashboard = subparsers.add_parser("dashboard", help="Launch the local graphical dashboard")
+    dashboard.add_argument("--host", default="127.0.0.1")
+    dashboard.add_argument("--port", type=int, default=8765)
+    dashboard.add_argument("--open-browser", action="store_true")
     return parser
 
 
@@ -60,6 +65,9 @@ def _print_json(value: object) -> None:
 
 def run(args: argparse.Namespace, settings: Settings) -> int:
     configure_logging(settings.log_path)
+    if args.command == "dashboard":
+        serve_dashboard(settings, host=args.host, port=args.port, open_browser=args.open_browser)
+        return 0
     logger = logging.getLogger(__name__)
     client = ReadOnlyMt5Client(mt5_path=settings.mt5_path)
     try:
