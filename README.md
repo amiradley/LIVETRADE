@@ -75,6 +75,8 @@ For a desktop-style launch, double-click `run_dashboard.cmd`. The launcher refus
 
 The dashboard's START button begins only the verified research/demo-shadow workflow. STOP ends that workflow without placing, modifying, or closing broker positions. Currency conversion to MYR, realised-deal history, profit allocation, and actual execution remain explicitly pending or unavailable until their later milestones.
 
+Stage 1.6 adds read-only broker deal-history reconciliation, partial-close aggregation, a persistent 20% savings-reserve high-water-mark ledger, and USD/MYR conversion through the configured exchange-rate source. Broker currency values remain the source of truth; converted MYR values are labelled estimates and become unavailable if the rate is stale or cannot be retrieved. No withdrawal, transfer, or order API exists.
+
 ## Tests
 
 ```powershell

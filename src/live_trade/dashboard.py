@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from .config import Settings
 from .finance import FinancialDataService, FinancialSnapshot
+from .intelligence import FinancialIntelligenceService, FinancialIntelligenceSnapshot
 from .mt5_client import ReadOnlyMt5Client
 from .session import SessionError, SessionMode, SessionState, TradingSessionController
 from .storage import MarketDataStore
@@ -43,7 +44,19 @@ def _field(value: Any, status: str, source: str | None = None) -> dict[str, Any]
     return {"value": _number(value), "status": status, "source": source}
 
 
-def _position_payload(position: Any) -> dict[str, Any]:
+def _converted_field(field: dict[str, Any], rate: Any, quote_currency: str = "MYR") -> dict[str, Any]:
+    if rate.rate is None or field["value"] is None:
+        return {"value": None, "status": "UNAVAILABLE" if rate.status == "UNAVAILABLE" else "STALE", "source": rate.source}
+    return {
+        "value": field["value"] * rate.rate,
+        "status": "ESTIMATED" if rate.status == "OK" else rate.status,
+        "source": rate.source,
+        "currency": quote_currency,
+    }
+
+
+def _position_payload(position: Any, rate: Any) -> dict[str, Any]:
+    floating = _field(position.floating_pnl, "BROKER_VERIFIED", "MT5 positions_get")
     return {
         "ticket": position.ticket,
         "symbol": position.symbol,
@@ -52,7 +65,7 @@ def _position_payload(position: Any) -> dict[str, Any]:
         "entry_price": position.entry_price,
         "current_price": position.current_price,
         "floating_pnl": position.floating_pnl,
-        "floating_pnl_myr": None,
+        "floating_pnl_myr": _converted_field(floating, rate),
         "stop_loss": position.stop_loss,
         "take_profit": position.take_profit,
         "margin": position.margin,
@@ -63,38 +76,98 @@ def _position_payload(position: Any) -> dict[str, Any]:
     }
 
 
-def _snapshot_payload(snapshot: FinancialSnapshot, account: dict[str, Any]) -> dict[str, Any]:
+def _history_payload(intelligence: FinancialIntelligenceSnapshot) -> dict[str, Any]:
+    rate = intelligence.exchange_rate
+    return {
+        "status": intelligence.history_status,
+        "error": intelligence.history_error,
+        "raw_deal_count": intelligence.raw_deal_count,
+        "results": [
+            {
+                **trade.to_dict(),
+                "net_profit_myr": _converted_field(
+                    _field(trade.net_profit, "INTERNALLY_CALCULATED", "aggregated MT5 deal history"), rate
+                ),
+                "currency": intelligence.exchange_rate.base_currency,
+            }
+            for trade in intelligence.history
+        ],
+        "performance": {
+            name: {
+                **_field(value, "INTERNALLY_CALCULATED", "aggregated MT5 deal history"),
+                "myr": _converted_field(
+                    _field(value, "INTERNALLY_CALCULATED", "aggregated MT5 deal history"), rate
+                ),
+            }
+            for name, value in intelligence.performance.items()
+        },
+        "exchange_rate": rate.to_dict(),
+        "allocation": dict(intelligence.allocation),
+    }
+
+
+def _snapshot_payload(
+    snapshot: FinancialSnapshot,
+    account: dict[str, Any],
+    intelligence: FinancialIntelligenceSnapshot,
+) -> dict[str, Any]:
+    rate = intelligence.exchange_rate
+    balance = _field(snapshot.balance, "BROKER_VERIFIED", "MT5 account_info")
+    equity = _field(snapshot.equity, "BROKER_VERIFIED", "MT5 account_info")
+    profit = _field(account.get("profit"), "BROKER_VERIFIED", "MT5 account_info")
+    margin_used = _field(snapshot.margin_used, "BROKER_VERIFIED", "MT5 account_info")
+    free_margin = _field(snapshot.free_margin, "BROKER_VERIFIED", "MT5 account_info")
+    floating = _field(snapshot.floating_pnl, "INTERNALLY_CALCULATED", "sum of MT5 positions")
+    allocation = intelligence.allocation
+    realised = _field(intelligence.performance.get("cumulative"), "INTERNALLY_CALCULATED", "aggregated MT5 deal history")
+    reserved = _field(allocation.get("total_reserved"), "INTERNALLY_CALCULATED", "20% high-water-mark ledger")
+    retained = _field(allocation.get("total_retained"), "INTERNALLY_CALCULATED", "80% high-water-mark ledger")
+    trading_capital = (
+        _field(snapshot.balance - float(allocation.get("total_reserved", 0.0)), "INTERNALLY_CALCULATED", "balance minus savings reserve")
+        if snapshot.balance is not None
+        else _field(None, "UNAVAILABLE", "balance unavailable")
+    )
     return {
         "captured_at": _iso(snapshot.captured_at),
         "account_type": snapshot.account_type,
         "account_currency": snapshot.account_currency,
         "login": account.get("login"),
         "server": account.get("server"),
-        "balance": _field(snapshot.balance, "BROKER_VERIFIED", "MT5 account_info"),
-        "equity": _field(snapshot.equity, "BROKER_VERIFIED", "MT5 account_info"),
-        "profit": _field(account.get("profit"), "BROKER_VERIFIED", "MT5 account_info"),
-        "margin_used": _field(snapshot.margin_used, "BROKER_VERIFIED", "MT5 account_info"),
-        "free_margin": _field(snapshot.free_margin, "BROKER_VERIFIED", "MT5 account_info"),
+        "balance": {**balance, "myr": _converted_field(balance, rate)},
+        "equity": {**equity, "myr": _converted_field(equity, rate)},
+        "profit": {**profit, "myr": _converted_field(profit, rate)},
+        "margin_used": {**margin_used, "myr": _converted_field(margin_used, rate)},
+        "free_margin": {**free_margin, "myr": _converted_field(free_margin, rate)},
         "margin_level": _field(account.get("margin_level"), "BROKER_VERIFIED", "MT5 account_info"),
-        "floating_pnl": _field(snapshot.floating_pnl, "INTERNALLY_CALCULATED", "sum of MT5 positions"),
-        "positions": [_position_payload(position) for position in snapshot.positions],
+        "floating_pnl": {**floating, "myr": _converted_field(floating, rate)},
+        "positions": [_position_payload(position, rate) for position in snapshot.positions],
         "position_count": len(snapshot.positions),
         "data_quality": snapshot.data_quality,
         "currency_conversion": {
             "currency": "MYR",
-            "rate": None,
-            "source": None,
-            "status": "UNAVAILABLE",
-            "message": "No exchange-rate source is configured; broker currency is shown unchanged.",
+            "rate": rate.rate,
+            "source": rate.source,
+            "retrieved_at": _iso(rate.retrieved_at),
+            "quote_date": rate.quote_date.isoformat() if rate.quote_date else None,
+            "status": rate.status,
+            "message": rate.error or ("Live rate retrieved." if rate.rate is not None else "Exchange-rate data unavailable."),
         },
         "allocation": {
-            "original_capital": _field(None, "PENDING", "future accounting ledger"),
-            "realised_net_profit": _field(None, "PENDING", "future deal-history ledger"),
-            "reserved_savings": _field(None, "PENDING", "future accounting ledger"),
-            "retained_trading_profits": _field(None, "PENDING", "future accounting ledger"),
+            "original_capital": _field(None, "PENDING", "future capital ledger"),
+            "realised_net_profit": {**realised, "myr": _converted_field(realised, rate)},
+            "reserved_savings": {**reserved, "myr": _converted_field(reserved, rate)},
+            "retained_trading_profits": {**retained, "myr": _converted_field(retained, rate)},
             "actual_savings_withdrawals": _field(None, "UNAVAILABLE", "not implemented"),
-            "trading_capital": _field(None, "PENDING", "future accounting ledger"),
+            "trading_capital": {**trading_capital, "myr": _converted_field(trading_capital, rate)},
         },
+        "performance": {
+            name: {
+                **_field(value, "INTERNALLY_CALCULATED", "aggregated MT5 deal history"),
+                "myr": _converted_field(_field(value, "INTERNALLY_CALCULATED", "aggregated MT5 deal history"), rate),
+            }
+            for name, value in intelligence.performance.items()
+        },
+        "savings_calculation": dict(allocation),
     }
 
 
@@ -117,6 +190,7 @@ class DashboardService:
         self.client = ReadOnlyMt5Client(mt5_path=settings.mt5_path)
         self.financial = FinancialDataService(self.client)
         self.store = MarketDataStore(settings.db_path)
+        self.intelligence = FinancialIntelligenceService(self.store)
         self.controller = TradingSessionController(
             self.client,
             self.financial,
@@ -136,8 +210,9 @@ class DashboardService:
             terminal = self.client.terminal_info()
             account = self.client.account_info() or {}
             snapshot = self.financial.capture()
+            intelligence = self.intelligence.capture(self.client, str(account.get("currency") or "UNKNOWN"))
             snapshot_id = self.store.save_financial_snapshot(snapshot)
-            financial = _snapshot_payload(snapshot, account)
+            financial = _snapshot_payload(snapshot, account, intelligence)
             payload = {
                 "connection": {
                     "status": "CONNECTED",
@@ -151,6 +226,7 @@ class DashboardService:
                 },
                 "terminal": terminal,
                 "financial": financial,
+                "history": _history_payload(intelligence),
                 "snapshot_id": snapshot_id,
                 "session": _session_payload(self.controller.status),
             }
@@ -189,10 +265,14 @@ class DashboardService:
                         "floating_pnl",
                     ):
                         stale["financial"][key]["status"] = "STALE"
+                        if stale["financial"][key].get("myr"):
+                            stale["financial"][key]["myr"]["status"] = "STALE"
                     stale["financial"]["positions"] = [
                         {**position, "data_freshness": "STALE"}
                         for position in stale["financial"]["positions"]
                     ]
+                    if stale.get("history"):
+                        stale["history"]["status"] = "STALE"
                     stale["session"] = _session_payload(self.controller.status)
                     return stale
                 return {
@@ -215,11 +295,13 @@ class DashboardService:
             if status.financial is not None:
                 account = self.client.account_info() or {}
                 snapshot_id = self.store.save_financial_snapshot(status.financial)
-                payload = _snapshot_payload(status.financial, account)
+                intelligence = self.intelligence.capture(self.client, str(account.get("currency") or "UNKNOWN"))
+                payload = _snapshot_payload(status.financial, account, intelligence)
                 self.last_successful = {
                     "connection": {"status": "CONNECTED", "broker_verified": True, "error": None},
                     "terminal": self.client.terminal_info(),
                     "financial": payload,
+                    "history": _history_payload(intelligence),
                     "snapshot_id": snapshot_id,
                     "session": _session_payload(status),
                 }
@@ -288,11 +370,15 @@ class DashboardService:
         }
 
     def history(self) -> dict[str, Any]:
-        return {
-            "status": "UNAVAILABLE",
-            "message": "Verified broker deal-history reconciliation is a later milestone.",
-            "results": [],
-        }
+        with self.lock:
+            if self.last_successful is None:
+                self.overview()
+            if self.last_successful and self.last_successful.get("history"):
+                history = self.last_successful["history"]
+                if history["status"] == "BROKER_VERIFIED" and not history["results"]:
+                    history = {**history, "message": "MT5 returned no closed deals in the configured lookback period.", "results": []}
+                return history
+            return {"status": "UNAVAILABLE", "message": "Broker deal history is unavailable.", "results": []}
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -365,7 +451,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 class DashboardServer(ThreadingHTTPServer):
-    allow_reuse_address = True
+    # A second instance must fail rather than silently creating a competing local API.
+    allow_reuse_address = False
 
     def __init__(self, address: tuple[str, int], service: DashboardService) -> None:
         self.service = service

@@ -47,6 +47,9 @@ class FakeMt5:
     def positions_get(self):
         return ()
 
+    def history_deals_get(self, date_from, date_to):
+        return ()
+
     def symbols_get(self):
         return (
             {"name": "EURUSD", "visible": True, "point": 0.00001, "digits": 5, "trade_mode": 4},

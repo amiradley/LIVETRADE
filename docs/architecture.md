@@ -42,6 +42,12 @@ The dashboard refreshes broker financial values through a short-lived MT5 read c
 
 `run_dashboard.cmd` calls `run_dashboard.ps1`. The launcher checks for a Low-integrity context and stops with an actionable message because MT5 IPC previously required a Medium-integrity Python process under the same user and Windows session. It does not elevate the process or change MT5 settings.
 
+## Stage 1.6 financial intelligence
+
+`ReadOnlyMt5Client.history_deals` reads the broker's deal history through `history_deals_get`; it does not expose order submission or mutation. `accounting.py` groups entry and exit deals by broker position identifier, aggregates partial closes, and preserves gross profit, commission, swap, fee, timestamps, prices, volume, and deal identifiers. Raw broker deals are deduplicated in SQLite by deal ticket.
+
+`intelligence.py` obtains USD/MYR through the configured rate endpoint, records source and quote/retrieval dates, validates positive finite values, and reports `UNAVAILABLE` or `STALE` rather than falling back to an invented rate. The savings ledger is internal only: eligible cumulative realised net profit above the persisted high-water mark is split 20% reserve / 80% retained profit. Losses do not create allocations, and recovery must exceed the previous high-water mark before a new allocation is recorded.
+
 ## Phase 2 scanner foundation
 
 `MarketScanner` is a read-only policy layer over the MT5 adapter. It discovers instruments, reads ticks, calculates spread in broker points, rejects stale or invalid data, labels a coarse UTC market session, progressively activates only the lowest-spread eligible candidates, retrieves configured OHLC timeframes, and persists a scan run plus per-symbol results. The scanner does not place orders and does not claim that eligibility implies profitability.

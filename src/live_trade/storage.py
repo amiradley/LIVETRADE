@@ -9,6 +9,8 @@ from .models import MarketSnapshot
 from .scanner import ScanRun
 from .technical import MultiTimeframeAnalysis, TechnicalAnalysis
 from .finance import FinancialSnapshot
+from .accounting import normalize_deal, savings_preview
+from .intelligence import ExchangeRate
 
 
 SCHEMA = """
@@ -148,6 +150,47 @@ CREATE TABLE IF NOT EXISTS session_records (
     ending_balance REAL,
     ending_equity REAL,
     message TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS broker_deals (
+    deal_id INTEGER PRIMARY KEY,
+    order_id INTEGER,
+    position_id INTEGER,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry_type INTEGER,
+    volume REAL,
+    price REAL,
+    profit REAL,
+    commission REAL,
+    swap REAL,
+    fee REAL,
+    deal_time TEXT,
+    captured_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS exchange_rates (
+    rate_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    base_currency TEXT NOT NULL,
+    quote_currency TEXT NOT NULL,
+    rate REAL NOT NULL,
+    source TEXT NOT NULL,
+    quote_date TEXT,
+    retrieved_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    UNIQUE(base_currency, quote_currency, retrieved_at)
+);
+CREATE TABLE IF NOT EXISTS savings_allocations (
+    allocation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    calculated_at TEXT NOT NULL,
+    cumulative_net_profit REAL NOT NULL,
+    prior_high_water_mark REAL NOT NULL,
+    eligible_profit REAL NOT NULL,
+    savings_rate REAL NOT NULL,
+    savings_amount REAL NOT NULL,
+    retained_amount REAL NOT NULL,
+    source_deal_count INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    calculation_json TEXT NOT NULL
 );
 """
 
@@ -459,3 +502,102 @@ class MarketDataStore:
                     session_id,
                 ),
             )
+
+    def save_broker_deals(self, deals: Any, captured_at: Any) -> int:
+        saved = 0
+        with self.connect() as connection:
+            for raw in deals:
+                deal = normalize_deal(raw)
+                if deal is None:
+                    continue
+                connection.execute(
+                    "INSERT OR IGNORE INTO broker_deals "
+                    "(deal_id, order_id, position_id, symbol, side, entry_type, volume, price, "
+                    "profit, commission, swap, fee, deal_time, captured_at, payload_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        deal.deal_id,
+                        deal.order_id,
+                        deal.position_id,
+                        deal.symbol,
+                        deal.side,
+                        deal.entry_type,
+                        deal.volume,
+                        deal.price,
+                        deal.profit,
+                        deal.commission,
+                        deal.swap,
+                        deal.fee,
+                        deal.deal_time.isoformat() if deal.deal_time else None,
+                        captured_at.isoformat(),
+                        json.dumps(dict(deal.raw), default=str),
+                    ),
+                )
+                saved += 1
+        return saved
+
+    def save_exchange_rate(self, rate: ExchangeRate) -> int | None:
+        if rate.rate is None or rate.retrieved_at is None:
+            return None
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO exchange_rates "
+                "(base_currency, quote_currency, rate, source, quote_date, retrieved_at, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    rate.base_currency,
+                    rate.quote_currency,
+                    rate.rate,
+                    rate.source or "unknown",
+                    rate.quote_date.isoformat() if rate.quote_date else None,
+                    rate.retrieved_at.isoformat(),
+                    rate.status,
+                ),
+            )
+            return int(cursor.lastrowid) if cursor.lastrowid else None
+
+    def apply_savings_allocation(
+        self, cumulative_net_profit: float, source_deal_count: int, calculated_at: Any
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT prior_high_water_mark, cumulative_net_profit FROM savings_allocations "
+                "ORDER BY allocation_id DESC LIMIT 1"
+            ).fetchone()
+            prior_high_water_mark = float(row[1]) if row else 0.0
+            preview = savings_preview(cumulative_net_profit, prior_high_water_mark)
+            totals = connection.execute(
+                "SELECT COALESCE(SUM(savings_amount), 0), COALESCE(SUM(retained_amount), 0) "
+                "FROM savings_allocations"
+            ).fetchone()
+            total_reserved = float(totals[0])
+            total_retained = float(totals[1])
+            allocation_id = None
+            if preview["status"] == "ALLOCATED":
+                cursor = connection.execute(
+                    "INSERT INTO savings_allocations "
+                    "(calculated_at, cumulative_net_profit, prior_high_water_mark, eligible_profit, "
+                    "savings_rate, savings_amount, retained_amount, source_deal_count, status, calculation_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        calculated_at.isoformat(),
+                        preview["cumulative_net_profit"],
+                        preview["prior_high_water_mark"],
+                        preview["eligible_profit"],
+                        preview["savings_rate"],
+                        preview["savings_amount"],
+                        preview["retained_amount"],
+                        source_deal_count,
+                        preview["status"],
+                        json.dumps(preview),
+                    ),
+                )
+                allocation_id = int(cursor.lastrowid)
+                total_reserved += float(preview["savings_amount"])
+                total_retained += float(preview["retained_amount"])
+            return {
+                **preview,
+                "allocation_id": allocation_id,
+                "total_reserved": total_reserved,
+                "total_retained": total_retained,
+            }
