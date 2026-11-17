@@ -8,6 +8,7 @@ from typing import Any
 from .models import MarketSnapshot
 from .scanner import ScanRun
 from .technical import MultiTimeframeAnalysis, TechnicalAnalysis
+from .finance import FinancialSnapshot
 
 
 SCHEMA = """
@@ -106,6 +107,47 @@ CREATE TABLE IF NOT EXISTS multi_timeframe_analysis (
     score_breakdown_json TEXT NOT NULL,
     timeframe_json TEXT NOT NULL,
     UNIQUE (symbol, analysis_time)
+);
+CREATE TABLE IF NOT EXISTS financial_snapshots (
+    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at TEXT NOT NULL,
+    account_type TEXT NOT NULL,
+    account_currency TEXT NOT NULL,
+    balance REAL,
+    equity REAL,
+    margin_used REAL,
+    free_margin REAL,
+    floating_pnl REAL NOT NULL,
+    data_quality TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS financial_positions (
+    snapshot_id INTEGER NOT NULL REFERENCES financial_snapshots(snapshot_id),
+    ticket INTEGER,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    volume REAL,
+    entry_price REAL,
+    current_price REAL,
+    floating_pnl REAL,
+    stop_loss REAL,
+    take_profit REAL,
+    margin REAL,
+    opened_at TEXT,
+    captured_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, ticket, symbol)
+);
+CREATE TABLE IF NOT EXISTS session_records (
+    session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mode TEXT NOT NULL,
+    state TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    stopped_at TEXT,
+    starting_balance REAL,
+    starting_equity REAL,
+    ending_balance REAL,
+    ending_equity REAL,
+    message TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -333,3 +375,87 @@ class MarketDataStore:
             ).fetchone()
             assert row is not None
             return int(row[0])
+
+    def save_financial_snapshot(self, snapshot: FinancialSnapshot) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO financial_snapshots "
+                "(captured_at, account_type, account_currency, balance, equity, margin_used, "
+                "free_margin, floating_pnl, data_quality) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    snapshot.captured_at.isoformat(),
+                    snapshot.account_type,
+                    snapshot.account_currency,
+                    snapshot.balance,
+                    snapshot.equity,
+                    snapshot.margin_used,
+                    snapshot.free_margin,
+                    snapshot.floating_pnl,
+                    snapshot.data_quality,
+                ),
+            )
+            snapshot_id = int(cursor.lastrowid)
+            for position in snapshot.positions:
+                connection.execute(
+                    "INSERT INTO financial_positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        snapshot_id,
+                        position.ticket,
+                        position.symbol,
+                        position.side,
+                        position.volume,
+                        position.entry_price,
+                        position.current_price,
+                        position.floating_pnl,
+                        position.stop_loss,
+                        position.take_profit,
+                        position.margin,
+                        position.opened_at.isoformat() if position.opened_at else None,
+                        position.captured_at.isoformat(),
+                        json.dumps(dict(position.raw), default=str),
+                    ),
+                )
+            return snapshot_id
+
+    def create_session(
+        self,
+        *,
+        mode: str,
+        state: str,
+        started_at: Any,
+        starting_balance: float | None,
+        starting_equity: float | None,
+    ) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO session_records "
+                "(mode, state, started_at, starting_balance, starting_equity) VALUES (?, ?, ?, ?, ?)",
+                (mode, state, started_at.isoformat(), starting_balance, starting_equity),
+            )
+            return int(cursor.lastrowid)
+
+    def update_session(
+        self,
+        session_id: int | None,
+        *,
+        state: str,
+        ending_balance: float | None,
+        ending_equity: float | None,
+        stopped_at: Any | None,
+        message: str,
+    ) -> None:
+        if session_id is None:
+            raise KeyError("Cannot update a session without a session_id")
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE session_records SET state = ?, stopped_at = ?, ending_balance = ?, "
+                "ending_equity = ?, message = ? WHERE session_id = ?",
+                (
+                    state,
+                    stopped_at.isoformat() if stopped_at else None,
+                    ending_balance,
+                    ending_equity,
+                    message,
+                    session_id,
+                ),
+            )

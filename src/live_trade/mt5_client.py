@@ -139,6 +139,15 @@ class ReadOnlyMt5Client:
             raise Mt5Error(f"MT5 symbols_get failed: {error}")
         return tuple(_record_to_dict(value) for value in values)
 
+    def positions(self) -> tuple[dict[str, Any], ...]:
+        """Return broker-reported open positions without any mutation capability."""
+        self._require_connection()
+        values = self.api.positions_get()
+        if values is None:
+            error = _record_to_dict(self.api.last_error())
+            raise Mt5Error(f"MT5 positions_get failed: {error}")
+        return tuple(_record_to_dict(value) for value in values)
+
     def get_tick(self, symbol: str) -> Tick:
         self._require_connection()
         value = self.api.symbol_info_tick(symbol)

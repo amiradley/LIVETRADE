@@ -26,6 +26,14 @@ The future START flow must pass connectivity, account, market-data, risk, and re
 
 No session-controller or execution code is enabled in Phase 1.1.
 
+## Stage 1 financial and session backend
+
+`FinancialDataService` exposes broker-reported account currency, balance, equity, margin, free margin, open positions, and floating P&L as a read-only dashboard model. Original capital, realised P&L, retained profit, savings reserve, and MYR conversion are intentionally separate future ledgers; no missing value is silently estimated.
+
+`TradingSessionController` currently supports only `RESEARCH` and `DEMO_SHADOW` modes. START performs connection, account, market-data, historical-data, and database checks before recording a running session. STOP inspects broker positions; with no positions it safely disconnects, while any remaining position produces `UNRESOLVED_POSITIONS` because this stage has no close-order capability. The controller exposes no order mutation methods.
+
+The future dashboard will use this backend as a read model with exactly two primary controls, START and STOP. Emergency suspension, liquidation, deal-history reconciliation, and execution remain later explicitly authorized stages.
+
 ## Phase 2 scanner foundation
 
 `MarketScanner` is a read-only policy layer over the MT5 adapter. It discovers instruments, reads ticks, calculates spread in broker points, rejects stale or invalid data, labels a coarse UTC market session, progressively activates only the lowest-spread eligible candidates, retrieves configured OHLC timeframes, and persists a scan run plus per-symbol results. The scanner does not place orders and does not claim that eligibility implies profitability.

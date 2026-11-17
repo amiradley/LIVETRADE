@@ -7,6 +7,7 @@ from typing import Sequence
 
 from .config import Settings, load_settings
 from .diagnostics import build_rejection_report
+from .finance import FinancialDataService
 from .logging_config import configure_logging
 from .mt5_client import ReadOnlyMt5Client
 from .scanner import MarketScanner, ScannerConfig
@@ -49,6 +50,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include the current forming candle as provisional analysis",
     )
+    subparsers.add_parser("financial", help="Read and persist broker financial information")
     return parser
 
 
@@ -139,6 +141,24 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
                     "multi_timeframe_id": multi_timeframe_id,
                     "unavailable_timeframes": unavailable,
                     "analysis": multi_timeframe.to_dict(),
+                }
+            )
+        elif args.command == "financial":
+            snapshot = FinancialDataService(client).capture()
+            snapshot_id = MarketDataStore(settings.db_path).save_financial_snapshot(snapshot)
+            _print_json(
+                {
+                    "snapshot_id": snapshot_id,
+                    "captured_at": snapshot.captured_at,
+                    "account_type": snapshot.account_type,
+                    "currency": snapshot.account_currency,
+                    "balance": snapshot.balance,
+                    "equity": snapshot.equity,
+                    "margin_used": snapshot.margin_used,
+                    "free_margin": snapshot.free_margin,
+                    "floating_pnl": snapshot.floating_pnl,
+                    "open_positions": len(snapshot.positions),
+                    "data_quality": snapshot.data_quality,
                 }
             )
         return 0

@@ -34,7 +34,18 @@ class FakeMt5:
         return {"name": "Fake MT5", "connected": True}
 
     def account_info(self):
-        return {"login": 12345, "balance": 10000.0}
+        return {
+            "login": 12345,
+            "trade_mode": 0,
+            "currency": "USD",
+            "balance": 10000.0,
+            "equity": 10000.0,
+            "margin": 0.0,
+            "margin_free": 10000.0,
+        }
+
+    def positions_get(self):
+        return ()
 
     def symbols_get(self):
         return (

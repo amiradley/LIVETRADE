@@ -46,6 +46,7 @@ python -m live_trade snapshot --symbol EURUSD --timeframe M1 --bars 200
 python -m live_trade scan --symbol EURUSD --timeframe M1 --timeframe M5 --bars 100
 python -m live_trade scan --symbol EURUSD --timeframe M1 --bars 10 --broker-server-offset-hours 2
 python -m live_trade analyze --symbol EURUSD --timeframe M1 --timeframe M5 --bars 200
+python -m live_trade financial
 ```
 
 Repeat `--symbol` for additional instruments. Snapshot data is stored in `data/market_data.sqlite3`; structured logs are written to `logs/live_trade.jsonl`.
@@ -55,6 +56,8 @@ The Phase 2 scanner evaluates all discovered instruments when no `--symbol` filt
 `--broker-server-offset-hours` is an explicit timestamp interpretation setting, not a future-tick tolerance. The default is zero and future timestamps remain rejected. Use a non-zero value only after comparing raw MT5 tick and candle epochs with the Windows/Python clocks for the active broker terminal.
 
 The `analyze` command runs the numerical technical-analysis foundation over OHLC candles and persists indicator, pattern, structure, score, and multi-timeframe records. Confirmed analysis excludes the current forming candle by default; use `--include-live-candle` only for explicitly provisional observations. It remains read-only and does not produce execution decisions.
+
+The `financial` command reads broker account and open-position information from MT5 and stores a local financial snapshot. It does not calculate or display invented currency conversions, and it does not place or close trades.
 
 ## Tests
 
