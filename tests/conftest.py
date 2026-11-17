@@ -17,6 +17,7 @@ class FakeMt5:
     def __init__(self) -> None:
         self.initialized = False
         self.shutdown_called = False
+        self.tick_epoch = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
 
     def initialize(self, **kwargs):
         self.initialized = True
@@ -43,7 +44,7 @@ class FakeMt5:
 
     def symbol_info_tick(self, symbol):
         return {
-            "time": int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()),
+            "time": self.tick_epoch,
             "bid": 1.1000,
             "ask": 1.1002,
             "last": 1.1001,

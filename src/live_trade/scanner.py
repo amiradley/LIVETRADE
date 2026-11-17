@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from .models import Candle, Tick
@@ -36,6 +36,7 @@ class ScannerConfig:
     max_spread_points: float = 30.0
     max_tick_age_seconds: float = 60.0
     min_candles: int = 1
+    broker_server_utc_offset_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         normalized = tuple(timeframe.upper() for timeframe in self.timeframes)
@@ -50,6 +51,8 @@ class ScannerConfig:
             raise ValueError("max_active_instruments must be positive")
         if self.max_spread_points < 0 or self.max_tick_age_seconds < 0:
             raise ValueError("spread and tick-age limits must not be negative")
+        if not math.isfinite(self.broker_server_utc_offset_seconds):
+            raise ValueError("broker_server_utc_offset_seconds must be finite")
         if self.min_candles < 1:
             raise ValueError("min_candles must be positive")
         object.__setattr__(self, "timeframes", normalized)
@@ -68,6 +71,8 @@ class ScanResult:
     session: str
     eligible: bool
     activated: bool
+    effective_tick_time: datetime | None = None
+    timestamp_offset_seconds: float = 0.0
     reasons: tuple[str, ...] = ()
     candle_counts: Mapping[str, int] = field(default_factory=dict)
     latest_candle_times: Mapping[str, datetime] = field(default_factory=dict)
@@ -138,6 +143,7 @@ class MarketScanner:
                 session=session,
                 eligible=False,
                 activated=False,
+                timestamp_offset_seconds=self.config.broker_server_utc_offset_seconds,
                 reasons=tuple(reasons or ["tick_unavailable"]),
             )
 
@@ -155,7 +161,11 @@ class MarketScanner:
             spread_points = (ask - bid) / point
             if spread_points > self.config.max_spread_points:
                 reasons.append("spread_above_limit")
-        age = (captured_at - _utc(tick.time)).total_seconds()
+        raw_tick_time = _utc(tick.time)
+        effective_tick_time = raw_tick_time - timedelta(
+            seconds=self.config.broker_server_utc_offset_seconds
+        )
+        age = (captured_at - effective_tick_time).total_seconds()
         if age < -1:
             reasons.append("future_tick")
         elif age > self.config.max_tick_age_seconds:
@@ -163,7 +173,7 @@ class MarketScanner:
         return ScanResult(
             symbol=symbol,
             captured_at=captured_at,
-            tick_time=_utc(tick.time),
+            tick_time=raw_tick_time,
             bid=bid,
             ask=ask,
             spread_points=spread_points,
@@ -171,6 +181,8 @@ class MarketScanner:
             session=session,
             eligible=not reasons,
             activated=False,
+            effective_tick_time=effective_tick_time,
+            timestamp_offset_seconds=self.config.broker_server_utc_offset_seconds,
             reasons=tuple(reasons),
         )
 

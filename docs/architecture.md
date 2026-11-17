@@ -34,6 +34,8 @@ The first scanner increment supports M1, M5, M15, M30, H1, H4, and D1 retrieval 
 
 Future-dated tick timestamps are intentionally rejected. MT5/broker server clock offsets must be measured and supplied as explicit, audited configuration before any offset-aware activation is allowed; the scanner must not silently reinterpret timestamps.
 
+The current MetaQuotes-Demo observation measured a stable two-hour offset: raw tick and M1 candle epochs both converted to UTC were two hours ahead of the Python UTC clock, while Windows local time was UTC+08:00. The scanner can therefore be run with `--broker-server-offset-hours 2` for this verified terminal context; leaving the option at its default of zero preserves strict rejection until the offset is verified again.
+
 ## Profit Allocation Manager — planned accounting boundary
 
 The future manager is an accounting ledger only. It allocates 20% of eligible cumulative realised net profit to a savings reserve and retains 80% as trading capital. It excludes unrealised P&L, deposits, borrowed funds, and duplicate broker deals. Losses reduce cumulative profitability and must be recovered before new allocations become eligible.

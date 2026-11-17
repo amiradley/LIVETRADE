@@ -31,6 +31,12 @@ def _parser() -> argparse.ArgumentParser:
     scan.add_argument("--max-active", type=int, default=50)
     scan.add_argument("--max-spread-points", type=float, default=30.0)
     scan.add_argument("--max-tick-age", type=float, default=60.0)
+    scan.add_argument(
+        "--broker-server-offset-hours",
+        type=float,
+        default=0.0,
+        help="Explicit verified MT5 server-to-UTC offset; default 0 rejects future timestamps",
+    )
     return parser
 
 
@@ -72,6 +78,7 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
                 max_active_instruments=args.max_active,
                 max_spread_points=args.max_spread_points,
                 max_tick_age_seconds=args.max_tick_age,
+                broker_server_utc_offset_seconds=args.broker_server_offset_hours * 3600,
             )
             scan_run = MarketScanner(client, config).scan(tuple(args.symbol) if args.symbol else None)
             scan_id = MarketDataStore(settings.db_path).save_scan(scan_run)
@@ -83,6 +90,7 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
                     "eligible_count": sum(result.eligible for result in scan_run.results),
                     "activated_count": sum(result.activated for result in scan_run.results),
                     "timeframes": config.timeframes,
+                    "broker_server_offset_hours": args.broker_server_offset_hours,
                 }
             )
         return 0

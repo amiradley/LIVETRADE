@@ -43,3 +43,33 @@ def test_scanner_rejects_stale_ticks(fake_mt5):
 def test_market_session_uses_utc_and_marks_weekends():
     assert market_session(datetime(2026, 1, 1, 8, tzinfo=timezone.utc)) == "EUROPE"
     assert market_session(datetime(2026, 1, 3, 8, tzinfo=timezone.utc)) == "CLOSED_WEEKEND"
+
+
+def test_future_tick_requires_explicit_verified_server_offset(fake_mt5):
+    fake_mt5.tick_epoch = int(datetime(2026, 1, 1, 2, tzinfo=timezone.utc).timestamp())
+    captured_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    client = ReadOnlyMt5Client(api=fake_mt5)
+    client.connect()
+
+    rejected = MarketScanner(
+        client,
+        ScannerConfig(timeframes=("M1",), bars=1, max_tick_age_seconds=30),
+    ).scan(captured_at=captured_at)
+    accepted = MarketScanner(
+        client,
+        ScannerConfig(
+            timeframes=("M1",),
+            bars=1,
+            max_tick_age_seconds=30,
+            broker_server_utc_offset_seconds=7200,
+        ),
+    ).scan(captured_at=captured_at)
+
+    rejected_result = rejected.results[0]
+    accepted_result = accepted.results[0]
+    assert rejected_result.eligible is False
+    assert "future_tick" in rejected_result.reasons
+    assert accepted_result.eligible is True
+    assert accepted_result.timestamp_offset_seconds == 7200
+    assert accepted_result.tick_time == datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
+    assert accepted_result.effective_tick_time == captured_at

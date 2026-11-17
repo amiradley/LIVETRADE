@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS scan_results (
     reasons_json TEXT NOT NULL,
     candle_counts_json TEXT NOT NULL,
     latest_candle_times_json TEXT NOT NULL,
+    effective_tick_time TEXT,
+    timestamp_offset_seconds REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (scan_id, symbol)
 );
 """
@@ -90,6 +92,15 @@ class MarketDataStore:
         connection = sqlite3.connect(self.path)
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(SCHEMA)
+        existing_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(scan_results)")
+        }
+        if "effective_tick_time" not in existing_columns:
+            connection.execute("ALTER TABLE scan_results ADD COLUMN effective_tick_time TEXT")
+        if "timestamp_offset_seconds" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE scan_results ADD COLUMN timestamp_offset_seconds REAL NOT NULL DEFAULT 0"
+            )
         return connection
 
     def save_snapshot(self, snapshot: MarketSnapshot) -> int:
@@ -178,7 +189,11 @@ class MarketDataStore:
             scan_id = int(cursor.lastrowid)
             for result in scan.results:
                 connection.execute(
-                    "INSERT INTO scan_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO scan_results "
+                    "(scan_id, symbol, captured_at, tick_time, bid, ask, spread_points, "
+                    "tick_age_seconds, session, eligible, activated, reasons_json, "
+                    "candle_counts_json, latest_candle_times_json, effective_tick_time, "
+                    "timestamp_offset_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         scan_id,
                         result.symbol,
@@ -196,6 +211,8 @@ class MarketDataStore:
                         json.dumps(
                             {key: value.isoformat() for key, value in result.latest_candle_times.items()}
                         ),
+                        result.effective_tick_time.isoformat() if result.effective_tick_time else None,
+                        result.timestamp_offset_seconds,
                     ),
                 )
             return scan_id
