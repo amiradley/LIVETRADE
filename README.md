@@ -11,7 +11,7 @@ There is deliberately no order submission, modification, or position-closing pat
 - MetaTrader 5 desktop terminal installed and running
 - A broker account may be logged in to the terminal; this phase does not require credentials in environment variables
 
-The current development environment was inspected on 2026-11-17. Python was not available beyond a disabled Windows Store alias, and no MT5 terminal executable or running MT5 process was detected. Therefore, live connectivity could not be verified in this environment.
+MT5 IPC requires Python and the terminal to run under the same Windows user and session with compatible integrity levels. A low-integrity project shell may time out even when MT5 is visibly open. Do not run the application as Administrator merely to bypass this; use a normal Windows PowerShell session instead. See [docs/architecture.md](docs/architecture.md) for the launch procedure and future-control architecture.
 
 ## Setup
 
@@ -24,6 +24,16 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 ```
+
+For live MT5 verification, open a normal Windows PowerShell window under the same user that owns the MT5 terminal, then run:
+
+```powershell
+Set-Location 'C:\Users\USER\Desktop\LIVE TRADE'
+& '.\.venv\Scripts\python.exe' -m live_trade check
+& '.\.venv\Scripts\python.exe' -m live_trade snapshot --symbol EURUSD --timeframe M1 --bars 10
+```
+
+The terminal must already be running in the same Windows session. Avoid an Administrator launch unless the terminal itself is also intentionally run at that level.
 
 Set `MT5_PATH` in the environment only if the terminal is not discoverable by the MT5 package. Do not place passwords or API keys in `.env` or source control.
 

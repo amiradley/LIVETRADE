@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from collections.abc import Mapping
 
 from .models import Candle, MarketSnapshot, Tick
 
@@ -33,21 +35,62 @@ def load_native_api() -> ModuleType:
     return mt5
 
 
+def _python_scalar(value: Any) -> Any:
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return item()
+        except (TypeError, ValueError):
+            pass
+    return value
+
+
 def _record_to_dict(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
     if hasattr(value, "_asdict"):
-        return dict(value._asdict())
-    if isinstance(value, dict):
-        return dict(value)
+        return {key: _python_scalar(item) for key, item in value._asdict().items()}
+    if isinstance(value, Mapping):
+        return {key: _python_scalar(item) for key, item in value.items()}
+    dtype = getattr(value, "dtype", None)
+    field_names = getattr(dtype, "names", None)
+    if field_names:
+        return {name: _python_scalar(value[name]) for name in field_names}
     try:
-        return dict(value)
+        return {key: _python_scalar(item) for key, item in dict(value).items()}
     except (TypeError, ValueError):
         return {"value": repr(value)}
 
 
 def _utc_from_epoch(value: Any) -> datetime:
-    return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    except (OverflowError, OSError, TypeError, ValueError) as exc:
+        raise Mt5Error(f"Invalid epoch timestamp: {value!r}") from exc
+
+
+def _finite_float(raw: Mapping[str, Any], field: str, context: str) -> float:
+    if field not in raw or raw[field] is None:
+        raise Mt5Error(f"{context} is missing required field {field}")
+    try:
+        value = float(raw[field])
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise Mt5Error(f"{context} has invalid numeric field {field}: {raw[field]!r}") from exc
+    if not math.isfinite(value):
+        raise Mt5Error(f"{context} has non-finite numeric field {field}: {raw[field]!r}")
+    return value
+
+
+def _integer_value(raw: Mapping[str, Any], field: str, context: str, optional: bool = False) -> int | None:
+    if field not in raw or raw[field] is None:
+        if optional:
+            return None
+        raise Mt5Error(f"{context} is missing required field {field}")
+    try:
+        value = int(raw[field])
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise Mt5Error(f"{context} has invalid integer field {field}: {raw[field]!r}") from exc
+    return value
 
 
 class ReadOnlyMt5Client:
@@ -133,18 +176,19 @@ class ReadOnlyMt5Client:
             required = {"time", "open", "high", "low", "close", "tick_volume"}
             if not required.issubset(raw):
                 raise Mt5Error(f"Candle for {symbol} {timeframe} is missing required fields")
+            context = f"Candle for {symbol} {timeframe}"
             candles.append(
                 Candle(
                     symbol=symbol,
                     timeframe=timeframe,
                     time=_utc_from_epoch(raw["time"]),
-                    open=float(raw["open"]),
-                    high=float(raw["high"]),
-                    low=float(raw["low"]),
-                    close=float(raw["close"]),
-                    tick_volume=int(raw["tick_volume"]),
-                    spread=int(raw["spread"]) if raw.get("spread") is not None else None,
-                    real_volume=int(raw["real_volume"]) if raw.get("real_volume") is not None else None,
+                    open=_finite_float(raw, "open", context),
+                    high=_finite_float(raw, "high", context),
+                    low=_finite_float(raw, "low", context),
+                    close=_finite_float(raw, "close", context),
+                    tick_volume=_integer_value(raw, "tick_volume", context),
+                    spread=_integer_value(raw, "spread", context, optional=True),
+                    real_volume=_integer_value(raw, "real_volume", context, optional=True),
                 )
             )
         return tuple(candles)
