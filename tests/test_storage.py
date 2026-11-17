@@ -138,3 +138,17 @@ def test_confirmed_analysis_replaces_provisional_record(tmp_path):
             "SELECT candle_scope FROM technical_analysis WHERE analysis_id = ?",
             (analysis_id,),
         ).fetchone()[0] == "CLOSED"
+
+
+def test_sqlite_transaction_rolls_back_after_interrupted_write(tmp_path):
+    store = MarketDataStore(tmp_path / "rollback.sqlite3")
+
+    try:
+        with store.connect() as connection:
+            connection.execute("INSERT INTO runs (captured_at) VALUES (?)", ("interrupted",))
+            raise RuntimeError("simulated interrupted transaction")
+    except RuntimeError:
+        pass
+
+    with store.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
