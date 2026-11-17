@@ -73,10 +73,20 @@ def test_patterns_include_numerical_evidence():
         close=1.09,
         tick_volume=100,
     )
-    analysis = TechnicalAnalyzer(minimum_history=2).analyze("EURUSD", "M1", candles)
+    analysis = TechnicalAnalyzer(minimum_history=2).analyze(
+        "EURUSD", "M1", candles, closed_only=False
+    )
     names = {pattern.name for pattern in analysis.patterns}
     assert "hammer" in names
     assert all(pattern.evidence for pattern in analysis.patterns)
+
+
+def test_confirmed_analysis_excludes_current_forming_candle():
+    candles = make_candles([1.0, 1.01, 1.02])
+    analysis = TechnicalAnalyzer(minimum_history=2).analyze("EURUSD", "M1", candles)
+
+    assert analysis.candle_scope == "CLOSED"
+    assert analysis.source_candle_time == candles[-2].time
 
 
 def test_structure_and_multi_timeframe_conflict_are_explicit():

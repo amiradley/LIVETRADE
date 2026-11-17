@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS technical_analysis (
     timeframe TEXT NOT NULL,
     analysis_time TEXT NOT NULL,
     source_candle_time TEXT NOT NULL,
+    candle_scope TEXT NOT NULL,
     data_quality TEXT NOT NULL,
     indicator_json TEXT NOT NULL,
     patterns_json TEXT NOT NULL,
@@ -126,6 +127,13 @@ class MarketDataStore:
         if "timestamp_offset_seconds" not in existing_columns:
             connection.execute(
                 "ALTER TABLE scan_results ADD COLUMN timestamp_offset_seconds REAL NOT NULL DEFAULT 0"
+            )
+        technical_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(technical_analysis)")
+        }
+        if "candle_scope" not in technical_columns:
+            connection.execute(
+                "ALTER TABLE technical_analysis ADD COLUMN candle_scope TEXT NOT NULL DEFAULT 'UNKNOWN'"
             )
         return connection
 
@@ -267,14 +275,24 @@ class MarketDataStore:
         with self.connect() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO technical_analysis "
-                "(symbol, timeframe, analysis_time, source_candle_time, data_quality, "
+                "(symbol, timeframe, analysis_time, source_candle_time, candle_scope, data_quality, "
                 "indicator_json, patterns_json, structure_json, technical_score, score_breakdown_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(symbol, timeframe, source_candle_time) DO UPDATE SET "
+                "analysis_time = excluded.analysis_time, "
+                "candle_scope = excluded.candle_scope, "
+                "data_quality = excluded.data_quality, "
+                "indicator_json = excluded.indicator_json, "
+                "patterns_json = excluded.patterns_json, "
+                "structure_json = excluded.structure_json, "
+                "technical_score = excluded.technical_score, "
+                "score_breakdown_json = excluded.score_breakdown_json",
                 (
                     analysis.symbol,
                     analysis.timeframe,
                     analysis.analysis_time.isoformat(),
                     analysis.source_candle_time.isoformat(),
+                    analysis.candle_scope,
                     analysis.data_quality,
                     json.dumps(payload["indicator_values"], default=str),
                     json.dumps(payload["patterns"], default=str),

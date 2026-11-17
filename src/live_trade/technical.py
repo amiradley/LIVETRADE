@@ -52,6 +52,7 @@ class TechnicalAnalysis:
     timeframe: str
     analysis_time: datetime
     source_candle_time: datetime
+    candle_scope: str
     data_quality: str
     indicator_values: Mapping[str, float | None]
     patterns: tuple[PatternEvidence, ...]
@@ -65,6 +66,7 @@ class TechnicalAnalysis:
             "timeframe": self.timeframe,
             "analysis_time": self.analysis_time.isoformat(),
             "source_candle_time": self.source_candle_time.isoformat(),
+            "candle_scope": self.candle_scope,
             "data_quality": self.data_quality,
             "indicator_values": dict(self.indicator_values),
             "patterns": [pattern.to_dict() for pattern in self.patterns],
@@ -384,9 +386,16 @@ class TechnicalAnalyzer:
         timeframe: str,
         candles: Sequence[Candle],
         analysis_time: datetime | None = None,
+        closed_only: bool = True,
     ) -> TechnicalAnalysis:
         timeframe = timeframe.upper()
-        ordered = _validate_candles(candles)
+        validated = _validate_candles(candles)
+        if closed_only and len(validated) > 1:
+            ordered = validated[:-1]
+            candle_scope = "CLOSED"
+        else:
+            ordered = validated
+            candle_scope = "INCLUDING_LIVE"
         closes = [candle.close for candle in ordered]
         sma20 = sma(closes, 20)
         sma50 = sma(closes, 50)
@@ -429,6 +438,7 @@ class TechnicalAnalyzer:
             timeframe=timeframe,
             analysis_time=_utc(analysis_time or datetime.now(timezone.utc)),
             source_candle_time=_utc(ordered[-1].time),
+            candle_scope=candle_scope,
             data_quality=quality,
             indicator_values=indicators,
             patterns=patterns,
@@ -443,12 +453,15 @@ def analyze_multi_timeframe(
     candles_by_timeframe: Mapping[str, Sequence[Candle]],
     analyzer: TechnicalAnalyzer | None = None,
     analysis_time: datetime | None = None,
+    closed_only: bool = True,
 ) -> MultiTimeframeAnalysis:
     analyzer = analyzer or TechnicalAnalyzer()
     analyses: dict[str, TechnicalAnalysis] = {}
     for timeframe, candles in candles_by_timeframe.items():
         try:
-            analyses[timeframe.upper()] = analyzer.analyze(symbol, timeframe, candles, analysis_time)
+            analyses[timeframe.upper()] = analyzer.analyze(
+                symbol, timeframe, candles, analysis_time, closed_only=closed_only
+            )
         except TechnicalAnalysisError:
             continue
     directions = [analysis.structure.direction for analysis in analyses.values() if analysis.data_quality == "OK"]

@@ -54,7 +54,7 @@ The Phase 2 scanner evaluates all discovered instruments when no `--symbol` filt
 
 `--broker-server-offset-hours` is an explicit timestamp interpretation setting, not a future-tick tolerance. The default is zero and future timestamps remain rejected. Use a non-zero value only after comparing raw MT5 tick and candle epochs with the Windows/Python clocks for the active broker terminal.
 
-The `analyze` command runs the numerical technical-analysis foundation over OHLC candles and persists indicator, pattern, structure, score, and multi-timeframe records. It remains read-only and does not produce execution decisions.
+The `analyze` command runs the numerical technical-analysis foundation over OHLC candles and persists indicator, pattern, structure, score, and multi-timeframe records. Confirmed analysis excludes the current forming candle by default; use `--include-live-candle` only for explicitly provisional observations. It remains read-only and does not produce execution decisions.
 
 ## Tests
 

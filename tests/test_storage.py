@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from live_trade.models import Candle, MarketSnapshot, Tick
@@ -108,3 +109,32 @@ def test_technical_analysis_deduplicates_source_candle(tmp_path):
     second_id = store.save_technical_analysis(analysis)
 
     assert first_id == second_id
+
+
+def test_confirmed_analysis_replaces_provisional_record(tmp_path):
+    candles = tuple(
+        Candle(
+            symbol="EURUSD",
+            timeframe="M1",
+            time=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=index),
+            open=1.0 + index * 0.01,
+            high=1.02 + index * 0.01,
+            low=0.99 + index * 0.01,
+            close=1.01 + index * 0.01,
+            tick_volume=100,
+        )
+        for index in range(60)
+    )
+    analysis = TechnicalAnalyzer().analyze("EURUSD", "M1", candles, closed_only=False)
+    confirmed = replace(analysis, candle_scope="CLOSED")
+    store = MarketDataStore(tmp_path / "market.sqlite3")
+
+    analysis_id = store.save_technical_analysis(analysis)
+    confirmed_id = store.save_technical_analysis(confirmed)
+
+    assert analysis_id == confirmed_id
+    with store.connect() as connection:
+        assert connection.execute(
+            "SELECT candle_scope FROM technical_analysis WHERE analysis_id = ?",
+            (analysis_id,),
+        ).fetchone()[0] == "CLOSED"

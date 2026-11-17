@@ -44,6 +44,11 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument("--symbol", required=True)
     analyze.add_argument("--timeframe", action="append", choices=ReadOnlyMt5Client.TIMEFRAMES)
     analyze.add_argument("--bars", type=int, default=200)
+    analyze.add_argument(
+        "--include-live-candle",
+        action="store_true",
+        help="Include the current forming candle as provisional analysis",
+    )
     return parser
 
 
@@ -113,10 +118,17 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
                     unavailable[timeframe] = str(exc)
             analyzer = TechnicalAnalyzer()
             analyses = {
-                timeframe: analyzer.analyze(args.symbol.upper(), timeframe, candles)
+                timeframe: analyzer.analyze(
+                    args.symbol.upper(), timeframe, candles, closed_only=not args.include_live_candle
+                )
                 for timeframe, candles in candles_by_timeframe.items()
             }
-            multi_timeframe = analyze_multi_timeframe(args.symbol.upper(), candles_by_timeframe, analyzer)
+            multi_timeframe = analyze_multi_timeframe(
+                args.symbol.upper(),
+                candles_by_timeframe,
+                analyzer,
+                closed_only=not args.include_live_candle,
+            )
             store = MarketDataStore(settings.db_path)
             analysis_ids = [store.save_technical_analysis(analysis) for analysis in analyses.values()]
             multi_timeframe_id = store.save_multi_timeframe_analysis(multi_timeframe)

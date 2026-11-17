@@ -42,6 +42,8 @@ The current MetaQuotes-Demo observation measured a stable two-hour offset: raw t
 
 The score is a research measurement, not a probability of profit and not an execution permission. Insufficient history, invalid OHLC values, NaN, and infinite values remain explicit data-quality failures. Technical records are deduplicated by symbol, timeframe, and source-candle timestamp.
 
+Confirmed analysis excludes the current forming MT5 candle by default and records `candle_scope=CLOSED`. Including the current candle requires the explicit `--include-live-candle` option and is labelled `INCLUDING_LIVE`; it is provisional and must not be treated as confirmed pattern evidence.
+
 ## Profit Allocation Manager — planned accounting boundary
 
 The future manager is an accounting ledger only. It allocates 20% of eligible cumulative realised net profit to a savings reserve and retains 80% as trading capital. It excludes unrealised P&L, deposits, borrowed funds, and duplicate broker deals. Losses reduce cumulative profitability and must be recovered before new allocations become eligible.
