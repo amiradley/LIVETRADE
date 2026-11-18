@@ -64,6 +64,16 @@ The current MetaQuotes-Demo observation measured a stable two-hour offset: raw t
 
 The Storage Manager is a dry-run-only project health and retention report. It reports disk thresholds at 70%, 85%, and 90%, protects the database and application files, and classifies temporary, diagnostic, archive, and unclassified files for review. `python -m live_trade storage` and the dashboard Storage Manager page never delete files; every scan is appended to the storage audit log.
 
+## Stage 1.7 historical data foundation
+
+`instrument_intelligence.py` classifies the broker's full `symbols_get()` universe from broker-provided path, category, description, currencies, contract specifications, quote state, spread, and trade mode. It distinguishes research suitability from current market availability: a closed market or missing current quote is not permanently treated as unavailable. Classifications are refreshable and persist in `instrument_catalog`.
+
+`historical.py` provides the historical coverage audit, OHLC/timestamp validation, priority-based collection planning, and bounded resumable collection engine. Coverage is stored per symbol/timeframe in `historical_coverage`; accepted or flagged historical candles use a composite `(symbol, timeframe, raw_time)` key in `historical_candles`, with both raw and effective timestamps retained. Collection jobs and events persist progress, retries, errors, pause/resume/cancel state, and next MT5 position. Repeating a completed plan performs no new batch and SQLite ignores duplicate candles.
+
+The quality engine validates finite positive OHLC values, candle relationships, duplicates, ordering, future timestamps, missing intervals, and forming latest candles using the central broker-time configuration. Normal Friday-to-Sunday market closures are not reported as data gaps. Readiness is structural (`READY`, `READY_WITH_WARNINGS`, `INCOMPLETE`, `INVALID`, `INSUFFICIENT_HISTORY`, or `NOT_COLLECTED`) and never implies profitability.
+
+The collection scheduler is deliberately persistence-backed rather than an OS-level daemon. `collection-status` reports `active_scheduler=false` unless an explicit CLI/dashboard collection is running. The dashboard exposes `/api/historical`, audit, plan, bounded-start, pause, resume, and cancel controls; these endpoints have no order or account-mutation capability. Storage protection is checked before each batch, and collection pauses at the 90% disk threshold without deleting anything.
+
 ## Phase 2.2 technical-analysis foundation
 
 `TechnicalAnalyzer` operates only on validated numerical OHLC candles. It calculates SMA 20/50, EMA 9/20/50, RSI 14, MACD 12/26/9, ATR 14, ATR percentage, candle range, and recent volatility change. It detects only rule-based engulfing, hammer, shooting-star, doji, and strong-candle formations with numerical evidence. It also reports measurable higher/lower structure, support/resistance, breakouts, false breakouts, multi-timeframe agreement, and a provisional technical score with factor contributions.

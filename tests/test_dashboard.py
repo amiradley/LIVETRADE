@@ -41,6 +41,17 @@ def test_dashboard_storage_report_is_dry_run(tmp_path, fake_mt5):
     assert report["sqlite_size_bytes"] >= 0
 
 
+def test_dashboard_exposes_historical_data_status(tmp_path, fake_mt5):
+    from live_trade.mt5_client import ReadOnlyMt5Client
+
+    service = DashboardService(dashboard_settings(tmp_path), client=ReadOnlyMt5Client(api=fake_mt5))
+    report = service.historical()
+
+    assert report["instruments"]["total"] == 0
+    assert report["collection"]["active_scheduler"] is False
+    assert report["historical"]["candles"] == 0
+
+
 def test_dashboard_start_stop_and_duplicate_prevention(tmp_path, fake_mt5, monkeypatch):
     from live_trade.mt5_client import ReadOnlyMt5Client
 

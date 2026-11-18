@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from .config import Settings
 from .finance import FinancialDataService, FinancialSnapshot
+from .historical import CollectionScheduler, HistoricalDataEngine
 from .intelligence import FinancialIntelligenceService, FinancialIntelligenceSnapshot
 from .mt5_client import ReadOnlyMt5Client
 from .research import ResearchWorker
@@ -198,6 +199,8 @@ class DashboardService:
         self.financial = FinancialDataService(self.client)
         self.store = MarketDataStore(settings.db_path)
         self.storage_manager = StorageManager(settings.base_dir)
+        self.historical_engine = HistoricalDataEngine(self.client, self.store, settings.broker_time, settings.base_dir)
+        self.collection_scheduler = CollectionScheduler(self.store)
         self._storage_cache: dict[str, Any] | None = None
         self._storage_cache_at = 0.0
         self.lock = threading.RLock()
@@ -415,6 +418,57 @@ class DashboardService:
                 self._storage_cache_at = time.monotonic()
             return self._storage_cache
 
+    def historical(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "instruments": self.store.instrument_summary(),
+                "coverage": self.store.coverage_summary(),
+                "collection": self.collection_scheduler.status(),
+                "historical": self.store.historical_summary(),
+                "storage": self.storage(),
+            }
+
+    def historical_audit(self) -> dict[str, Any]:
+        with self.lock, self.client_lock:
+            owns_connection = self.controller.status.state is not SessionState.RUNNING
+            if owns_connection:
+                self.client.connect()
+            try:
+                symbols = self.settings.symbols or ("EURUSD",)
+                self.historical_engine.classify(symbols)
+                reports = self.historical_engine.audit(symbols, ("M1", "M5"), 200)
+                return {"reports": [report.to_dict() for report in reports], **self.historical()}
+            finally:
+                if owns_connection:
+                    self.client.disconnect()
+
+    def collection_plan(self) -> dict[str, Any]:
+        with self.lock, self.client_lock:
+            owns_connection = self.controller.status.state is not SessionState.RUNNING
+            if owns_connection:
+                self.client.connect()
+            try:
+                symbols = self.settings.symbols or ("EURUSD",)
+                plan = self.historical_engine.preview(symbols, ("M1", "M5"), "TIER1", 500)
+                return {"items": [item.to_dict() for item in plan], "estimated_bytes": sum(item.estimated_bytes for item in plan), **self.historical()}
+            finally:
+                if owns_connection:
+                    self.client.disconnect()
+
+    def collection_start(self) -> dict[str, Any]:
+        with self.lock, self.client_lock:
+            owns_connection = self.controller.status.state is not SessionState.RUNNING
+            if owns_connection:
+                self.client.connect()
+            try:
+                symbols = self.settings.symbols or ("EURUSD",)
+                plan = self.historical_engine.preview(symbols, ("M1", "M5"), "TIER1", 500)
+                result = self.historical_engine.collect(plan, max_batches=1, batch_size=100)
+                return {"result": result, **self.historical()}
+            finally:
+                if owns_connection:
+                    self.client.disconnect()
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "LIVE-TRADING-Dashboard/0.1"
@@ -467,6 +521,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send(self.service.history())
             if path == "/api/storage":
                 return self._send(self.service.storage())
+            if path == "/api/historical":
+                return self._send(self.service.historical())
             return self._send({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             LOGGER.exception("Dashboard request failed")
@@ -479,6 +535,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send(self.service.start())
             if path == "/api/session/stop":
                 return self._send(self.service.stop())
+            if path == "/api/historical/audit":
+                return self._send(self.service.historical_audit())
+            if path == "/api/historical/plan":
+                return self._send(self.service.collection_plan())
+            if path == "/api/historical/start":
+                return self._send(self.service.collection_start())
+            if path == "/api/historical/pause":
+                self.service.collection_scheduler.pause()
+                return self._send(self.service.historical())
+            if path == "/api/historical/resume":
+                self.service.collection_scheduler.resume()
+                return self._send(self.service.historical())
+            if path == "/api/historical/cancel":
+                self.service.collection_scheduler.cancel()
+                return self._send(self.service.historical())
             return self._send({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except SessionError as exc:
             self._send({"error": str(exc), "session": _session_payload(self.service.controller.status, self.service.controller.component_health())}, HTTPStatus.CONFLICT)

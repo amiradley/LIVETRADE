@@ -194,6 +194,98 @@ CREATE TABLE IF NOT EXISTS savings_allocations (
     status TEXT NOT NULL,
     calculation_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS instrument_catalog (
+    symbol TEXT PRIMARY KEY,
+    refreshed_at TEXT NOT NULL,
+    category TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    exchange TEXT NOT NULL DEFAULT '',
+    currency_base TEXT,
+    currency_profit TEXT,
+    currency_margin TEXT,
+    contract_size REAL,
+    tick_size REAL,
+    tick_value REAL,
+    volume_min REAL,
+    volume_max REAL,
+    volume_step REAL,
+    trade_mode INTEGER,
+    visible INTEGER,
+    bid REAL,
+    ask REAL,
+    spread_points REAL,
+    market_state TEXT NOT NULL,
+    trading_status TEXT NOT NULL,
+    suitability TEXT NOT NULL,
+    suitability_reasons_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_instrument_catalog_suitability ON instrument_catalog(suitability);
+CREATE INDEX IF NOT EXISTS idx_instrument_catalog_category ON instrument_catalog(category);
+CREATE TABLE IF NOT EXISTS historical_coverage (
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    audited_at TEXT NOT NULL,
+    earliest_candle_time TEXT,
+    latest_candle_time TEXT,
+    candle_count INTEGER NOT NULL,
+    complete_candle_count INTEGER NOT NULL,
+    gap_count INTEGER NOT NULL,
+    duplicate_count INTEGER NOT NULL,
+    invalid_count INTEGER NOT NULL,
+    timestamp_integrity TEXT NOT NULL,
+    latest_candle_complete INTEGER NOT NULL,
+    data_quality TEXT NOT NULL,
+    readiness TEXT NOT NULL,
+    error TEXT,
+    metadata_json TEXT NOT NULL,
+    PRIMARY KEY (symbol, timeframe)
+);
+CREATE INDEX IF NOT EXISTS idx_historical_coverage_readiness ON historical_coverage(readiness);
+CREATE TABLE IF NOT EXISTS historical_candles (
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    raw_time TEXT NOT NULL,
+    effective_time TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    tick_volume INTEGER NOT NULL,
+    spread INTEGER,
+    real_volume INTEGER,
+    quality_status TEXT NOT NULL,
+    quality_reasons_json TEXT NOT NULL,
+    collected_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, timeframe, raw_time)
+);
+CREATE INDEX IF NOT EXISTS idx_historical_candles_range ON historical_candles(symbol, timeframe, effective_time);
+CREATE TABLE IF NOT EXISTS collection_jobs (
+    job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    priority REAL NOT NULL,
+    target_bars INTEGER NOT NULL,
+    downloaded_bars INTEGER NOT NULL DEFAULT 0,
+    next_start_position INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(symbol, timeframe, tier)
+);
+CREATE INDEX IF NOT EXISTS idx_collection_jobs_status_priority ON collection_jobs(status, priority DESC);
+CREATE TABLE IF NOT EXISTS collection_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER,
+    event_time TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
 """
 
 
@@ -610,3 +702,177 @@ class MarketDataStore:
                 "total_reserved": total_reserved,
                 "total_retained": total_retained,
             }
+
+    def save_instrument_classifications(self, records: Any) -> int:
+        saved = 0
+        with self.connect() as connection:
+            for record in records:
+                connection.execute(
+                    "INSERT INTO instrument_catalog ("
+                    "symbol, refreshed_at, category, description, path, exchange, currency_base, "
+                    "currency_profit, currency_margin, contract_size, tick_size, tick_value, "
+                    "volume_min, volume_max, volume_step, trade_mode, visible, bid, ask, "
+                    "spread_points, market_state, trading_status, suitability, suitability_reasons_json, payload_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(symbol) DO UPDATE SET refreshed_at=excluded.refreshed_at, "
+                    "category=excluded.category, description=excluded.description, path=excluded.path, "
+                    "exchange=excluded.exchange, currency_base=excluded.currency_base, "
+                    "currency_profit=excluded.currency_profit, currency_margin=excluded.currency_margin, "
+                    "contract_size=excluded.contract_size, tick_size=excluded.tick_size, tick_value=excluded.tick_value, "
+                    "volume_min=excluded.volume_min, volume_max=excluded.volume_max, volume_step=excluded.volume_step, "
+                    "trade_mode=excluded.trade_mode, visible=excluded.visible, bid=excluded.bid, ask=excluded.ask, "
+                    "spread_points=excluded.spread_points, market_state=excluded.market_state, "
+                    "trading_status=excluded.trading_status, suitability=excluded.suitability, "
+                    "suitability_reasons_json=excluded.suitability_reasons_json, payload_json=excluded.payload_json",
+                    (
+                        record["symbol"], record["refreshed_at"], record["category"], record.get("description", ""),
+                        record.get("path", ""), record.get("exchange", ""), record.get("currency_base"),
+                        record.get("currency_profit"), record.get("currency_margin"), record.get("contract_size"),
+                        record.get("tick_size"), record.get("tick_value"), record.get("volume_min"),
+                        record.get("volume_max"), record.get("volume_step"), record.get("trade_mode"),
+                        int(bool(record.get("visible"))) if record.get("visible") is not None else None,
+                        record.get("bid"), record.get("ask"), record.get("spread_points"),
+                        record["market_state"], record["trading_status"], record["suitability"],
+                        json.dumps(record.get("suitability_reasons", [])), json.dumps(record.get("raw", {}), default=str),
+                    ),
+                )
+                saved += 1
+        return saved
+
+    def instrument_summary(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT suitability, COUNT(*) FROM instrument_catalog GROUP BY suitability"
+            ).fetchall()
+            categories = connection.execute(
+                "SELECT category, COUNT(*) FROM instrument_catalog GROUP BY category ORDER BY category"
+            ).fetchall()
+            return {
+                "total": int(connection.execute("SELECT COUNT(*) FROM instrument_catalog").fetchone()[0]),
+                "by_suitability": {str(row[0]): int(row[1]) for row in rows},
+                "by_category": {str(row[0]): int(row[1]) for row in categories},
+                "refreshed_at": connection.execute("SELECT MAX(refreshed_at) FROM instrument_catalog").fetchone()[0],
+            }
+
+    def save_coverage(self, report: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO historical_coverage (symbol, timeframe, audited_at, earliest_candle_time, "
+                "latest_candle_time, candle_count, complete_candle_count, gap_count, duplicate_count, "
+                "invalid_count, timestamp_integrity, latest_candle_complete, data_quality, readiness, error, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(symbol, timeframe) DO UPDATE SET audited_at=excluded.audited_at, "
+                "earliest_candle_time=excluded.earliest_candle_time, latest_candle_time=excluded.latest_candle_time, "
+                "candle_count=excluded.candle_count, complete_candle_count=excluded.complete_candle_count, "
+                "gap_count=excluded.gap_count, duplicate_count=excluded.duplicate_count, invalid_count=excluded.invalid_count, "
+                "timestamp_integrity=excluded.timestamp_integrity, latest_candle_complete=excluded.latest_candle_complete, "
+                "data_quality=excluded.data_quality, readiness=excluded.readiness, error=excluded.error, metadata_json=excluded.metadata_json",
+                (
+                    report["symbol"], report["timeframe"], report["audited_at"], report.get("earliest_candle_time"),
+                    report.get("latest_candle_time"), report["candle_count"], report["complete_candle_count"],
+                    report["gap_count"], report["duplicate_count"], report["invalid_count"], report["timestamp_integrity"],
+                    int(report["latest_candle_complete"]), report["data_quality"], report["readiness"],
+                    report.get("error"), json.dumps(report.get("metadata", {}), default=str),
+                ),
+            )
+
+    def coverage_summary(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT timeframe, COUNT(*), SUM(candle_count), SUM(complete_candle_count) "
+                "FROM historical_coverage GROUP BY timeframe ORDER BY timeframe"
+            ).fetchall()
+            readiness = connection.execute(
+                "SELECT readiness, COUNT(*) FROM historical_coverage GROUP BY readiness"
+            ).fetchall()
+            return {
+                "by_timeframe": {
+                    str(row[0]): {"audited": int(row[1]), "candles": int(row[2] or 0), "complete": int(row[3] or 0)}
+                    for row in rows
+                },
+                "by_readiness": {str(row[0]): int(row[1]) for row in readiness},
+            }
+
+    def save_historical_candles(self, records: Any) -> int:
+        saved = 0
+        with self.connect() as connection:
+            for record in records:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO historical_candles ("
+                    "symbol, timeframe, raw_time, effective_time, open, high, low, close, tick_volume, spread, real_volume, "
+                    "quality_status, quality_reasons_json, collected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record["symbol"], record["timeframe"], record["raw_time"], record["effective_time"],
+                        record["open"], record["high"], record["low"], record["close"], record["tick_volume"],
+                        record.get("spread"), record.get("real_volume"), record["quality_status"],
+                        json.dumps(record.get("quality_reasons", [])), record["collected_at"],
+                    ),
+                )
+                saved += max(0, cursor.rowcount)
+        return saved
+
+    def historical_summary(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            return {
+                "candles": int(connection.execute("SELECT COUNT(*) FROM historical_candles").fetchone()[0]),
+                "symbols": int(connection.execute("SELECT COUNT(DISTINCT symbol) FROM historical_candles").fetchone()[0]),
+                "bytes_estimate": int(connection.execute("SELECT COUNT(*) FROM historical_candles").fetchone()[0]) * 96,
+                "quality": {
+                    str(row[0]): int(row[1])
+                    for row in connection.execute("SELECT quality_status, COUNT(*) FROM historical_candles GROUP BY quality_status")
+                },
+            }
+
+    def create_collection_jobs(self, items: Any, now: Any) -> list[int]:
+        job_ids: list[int] = []
+        with self.connect() as connection:
+            for item in items:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO collection_jobs "
+                    "(symbol, timeframe, tier, priority, target_bars, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?)",
+                    (item["symbol"], item["timeframe"], item["tier"], item["priority"], item["target_bars"], now.isoformat(), now.isoformat()),
+                )
+                if cursor.lastrowid:
+                    job_ids.append(int(cursor.lastrowid))
+                else:
+                    row = connection.execute(
+                        "SELECT job_id FROM collection_jobs WHERE symbol=? AND timeframe=? AND tier=?",
+                        (item["symbol"], item["timeframe"], item["tier"]),
+                    ).fetchone()
+                    if row:
+                        job_ids.append(int(row[0]))
+        return job_ids
+
+    def collection_jobs(self, statuses: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                rows = connection.execute(
+                    f"SELECT * FROM collection_jobs WHERE status IN ({placeholders}) ORDER BY priority DESC, job_id",
+                    statuses,
+                ).fetchall()
+            else:
+                rows = connection.execute("SELECT * FROM collection_jobs ORDER BY priority DESC, job_id").fetchall()
+            return [dict(row) for row in rows]
+
+    def update_collection_job(self, job_id: int, now: Any, **fields: Any) -> None:
+        allowed = {"downloaded_bars", "next_start_position", "status", "attempts", "last_error"}
+        values = {key: value for key, value in fields.items() if key in allowed}
+        if not values:
+            return
+        values["updated_at"] = now.isoformat()
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE collection_jobs SET {assignments} WHERE job_id = ?",
+                (*values.values(), job_id),
+            )
+
+    def collection_event(self, job_id: int | None, event_type: str, message: str, now: Any, payload: Any = None) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO collection_events (job_id, event_time, event_type, message, payload_json) VALUES (?, ?, ?, ?, ?)",
+                (job_id, now.isoformat(), event_type, message, json.dumps(payload or {}, default=str)),
+            )

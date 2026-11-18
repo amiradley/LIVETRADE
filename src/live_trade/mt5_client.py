@@ -184,14 +184,20 @@ class ReadOnlyMt5Client:
         )
 
     def get_candles(self, symbol: str, timeframe: str, count: int) -> tuple[Candle, ...]:
+        return self.get_candles_batch(symbol, timeframe, 0, count)
+
+    def get_candles_batch(self, symbol: str, timeframe: str, start_position: int, count: int) -> tuple[Candle, ...]:
+        """Read a bounded historical batch by MT5 position, without any mutation capability."""
         self._require_connection()
         timeframe = timeframe.upper()
         if timeframe not in self.TIMEFRAMES:
             raise ValueError(f"Unsupported timeframe {timeframe}; use {', '.join(self.TIMEFRAMES)}")
+        if start_position < 0:
+            raise ValueError("Candle start position must not be negative")
         if not 1 <= count <= 10000:
             raise ValueError("Candle count must be between 1 and 10000")
         constant = getattr(self.api, f"TIMEFRAME_{timeframe}")
-        values = self.api.copy_rates_from_pos(symbol, constant, 0, count)
+        values = self.api.copy_rates_from_pos(symbol, constant, start_position, count)
         if values is None:
             error = _record_to_dict(self.api.last_error())
             raise Mt5Error(f"No candles for {symbol} {timeframe}: {error}")

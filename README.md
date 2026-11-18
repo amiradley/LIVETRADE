@@ -47,6 +47,11 @@ python -m live_trade scan --symbol EURUSD --timeframe M1 --timeframe M5 --bars 1
 python -m live_trade scan --symbol EURUSD --timeframe M1 --bars 10
 python -m live_trade analyze --symbol EURUSD --timeframe M1 --timeframe M5 --bars 200
 python -m live_trade financial
+python -m live_trade instrument-audit
+python -m live_trade history-audit --symbol EURUSD --timeframe M1 --timeframe M5 --bars 200
+python -m live_trade collection-plan --symbol EURUSD --timeframe M1 --timeframe M5 --bars 500
+python -m live_trade collect --symbol EURUSD --timeframe M1 --timeframe M5 --bars 500 --max-batches 1
+python -m live_trade collection-status
 python -m live_trade dashboard --open-browser
 ```
 
@@ -79,6 +84,8 @@ Stage 1.6 adds read-only broker deal-history reconciliation, partial-close aggre
 
 Stage 1.6A adds end-to-end demo-shadow health reporting. START now starts the read-only scanner, closed-candle technical-analysis, and market-monitoring worker; STOP joins it before the final snapshot. Component cycle counts and thread liveness are exposed through `/api/status`, and MT5 failures transition the session to an explicit error/stale state.
 
+Stage 1.7 adds instrument intelligence, historical coverage audits, quality validation, a resumable historical-candle store, collection priorities, persisted collection jobs, and dashboard data-intelligence controls. The default collection commands are bounded and read-only. The scheduler is persistence-backed but intentionally not an operating-system service: collection runs only while explicitly started from the CLI or dashboard.
+
 ## Tests
 
 ```powershell
@@ -95,5 +102,6 @@ The tests use a mocked MT5 API and do not connect to a broker or place trades.
 - No hardcoded credentials.
 - Market timestamps preserve the raw MT5 epoch and use the central broker-time configuration for effective UTC validation. Retrieval time is captured separately as the snapshot timestamp.
 - `python -m live_trade storage` performs a dry-run-only retention scan. Protected SQLite/source/configuration files are never cleanup candidates; temporary files are reviewed after 7 days, diagnostic logs after 30 days, and research archives after 90 days. The dashboard exposes the same report without destructive actions.
+- Historical quality reports distinguish incomplete forming candles from invalid data and ignore normal weekend closures as expected market-session gaps. A `READY` dataset means structurally usable historical data only; it is not evidence of profitability or a trading edge.
 
 Later phases should add analysis and paper trading only after the read-only data path is stable and observable.

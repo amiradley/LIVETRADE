@@ -9,6 +9,8 @@ from .config import Settings, load_settings
 from .diagnostics import build_rejection_report
 from .dashboard import serve_dashboard
 from .finance import FinancialDataService
+from .historical import CollectionScheduler, HistoricalDataEngine
+from .instrument_intelligence import priority_for
 from .logging_config import configure_logging
 from .mt5_client import ReadOnlyMt5Client
 from .timestamping import BrokerTimeConfig
@@ -59,6 +61,28 @@ def _parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--port", type=int, default=8765)
     dashboard.add_argument("--open-browser", action="store_true")
     subparsers.add_parser("storage", help="Run a dry-run project storage and retention scan")
+    instrument = subparsers.add_parser("instrument-audit", help="Classify the broker instrument universe")
+    instrument.add_argument("--symbol", action="append", help="Limit audit; repeat for multiple symbols")
+    audit = subparsers.add_parser("history-audit", help="Audit recent historical coverage")
+    audit.add_argument("--symbol", action="append", help="Symbol; repeat for multiple symbols")
+    audit.add_argument("--timeframe", action="append", choices=ReadOnlyMt5Client.TIMEFRAMES)
+    audit.add_argument("--bars", type=int, default=200)
+    plan = subparsers.add_parser("collection-plan", help="Preview a bounded historical collection plan")
+    plan.add_argument("--symbol", action="append", help="Symbol; repeat for multiple symbols")
+    plan.add_argument("--timeframe", action="append", choices=ReadOnlyMt5Client.TIMEFRAMES)
+    plan.add_argument("--bars", type=int, default=500)
+    plan.add_argument("--tier", default="TIER1", choices=("TIER1", "TIER2", "TIER3"))
+    collect = subparsers.add_parser("collect", help="Run bounded, resumable historical collection")
+    collect.add_argument("--symbol", action="append", required=True)
+    collect.add_argument("--timeframe", action="append", choices=ReadOnlyMt5Client.TIMEFRAMES, required=True)
+    collect.add_argument("--bars", type=int, default=500)
+    collect.add_argument("--tier", default="TIER1", choices=("TIER1", "TIER2", "TIER3"))
+    collect.add_argument("--max-batches", type=int, default=1)
+    collect.add_argument("--batch-size", type=int, default=200)
+    subparsers.add_parser("collection-status", help="Show persisted collection status")
+    subparsers.add_parser("collection-pause", help="Pause queued collection jobs")
+    subparsers.add_parser("collection-resume", help="Resume paused collection jobs")
+    subparsers.add_parser("collection-cancel", help="Cancel queued collection jobs")
     return parser
 
 
@@ -74,12 +98,44 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
     if args.command == "storage":
         _print_json(StorageManager(settings.base_dir).scan().to_dict())
         return 0
+    if args.command.startswith("collection-") and args.command != "collection-plan":
+        scheduler = CollectionScheduler(MarketDataStore(settings.db_path))
+        if args.command == "collection-status":
+            _print_json(scheduler.status())
+        else:
+            getattr(scheduler, args.command.removeprefix("collection-"))()
+            _print_json(scheduler.status())
+        return 0
     logger = logging.getLogger(__name__)
     client = ReadOnlyMt5Client(mt5_path=settings.mt5_path, broker_time=settings.broker_time)
     try:
         client.connect()
         if args.command == "check":
             _print_json({"terminal": client.terminal_info(), "account": client.account_info()})
+        elif args.command == "instrument-audit":
+            engine = HistoricalDataEngine(client, MarketDataStore(settings.db_path), settings.broker_time, settings.base_dir)
+            _print_json(engine.classify(args.symbol))
+        elif args.command == "history-audit":
+            symbols = tuple(item.upper() for item in (args.symbol or settings.symbols))
+            if not symbols:
+                raise ValueError("Provide --symbol or set LIVE_TRADE_SYMBOLS before history-audit")
+            timeframes = tuple(args.timeframe or ("M1", "M5", "M15", "M30", "H1", "H4", "D1"))
+            engine = HistoricalDataEngine(client, MarketDataStore(settings.db_path), settings.broker_time, settings.base_dir)
+            reports = engine.audit(symbols, timeframes, args.bars)
+            _print_json({"reports": [report.to_dict() for report in reports], "summary": MarketDataStore(settings.db_path).coverage_summary()})
+        elif args.command == "collection-plan":
+            symbols = tuple(item.upper() for item in (args.symbol or settings.symbols))
+            if not symbols:
+                raise ValueError("Provide --symbol or set LIVE_TRADE_SYMBOLS before collection-plan")
+            timeframes = tuple(args.timeframe or ("M1", "M5"))
+            engine = HistoricalDataEngine(client, MarketDataStore(settings.db_path), settings.broker_time, settings.base_dir)
+            plan = engine.preview(symbols, timeframes, args.tier, args.bars)
+            _print_json({"items": [item.to_dict() for item in plan], "estimated_bytes": sum(item.estimated_bytes for item in plan), "count": len(plan)})
+        elif args.command == "collect":
+            engine = HistoricalDataEngine(client, MarketDataStore(settings.db_path), settings.broker_time, settings.base_dir)
+            plan = engine.preview(tuple(item.upper() for item in args.symbol), tuple(args.timeframe), args.tier, args.bars)
+            result = engine.collect(plan, max_batches=args.max_batches, batch_size=args.batch_size)
+            _print_json(result)
         elif args.command == "discover":
             instruments = client.discover_instruments()
             _print_json({"count": len(instruments), "instruments": instruments})
