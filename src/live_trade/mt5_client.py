@@ -9,6 +9,7 @@ from typing import Any
 from collections.abc import Mapping
 
 from .models import Candle, MarketSnapshot, Tick
+from .timestamping import BrokerTimeConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -98,9 +99,15 @@ class ReadOnlyMt5Client:
 
     TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
 
-    def __init__(self, api: Any | None = None, mt5_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        api: Any | None = None,
+        mt5_path: Path | None = None,
+        broker_time: BrokerTimeConfig | None = None,
+    ) -> None:
         self.api = api or load_native_api()
         self.mt5_path = mt5_path
+        self.broker_time = broker_time
         self._connected = False
 
     def connect(self) -> None:

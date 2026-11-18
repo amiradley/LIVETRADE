@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS scan_results (
     latest_candle_times_json TEXT NOT NULL,
     effective_tick_time TEXT,
     timestamp_offset_seconds REAL NOT NULL DEFAULT 0,
+    timestamp_configured INTEGER NOT NULL DEFAULT 0,
+    timestamp_config_source TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (scan_id, symbol)
 );
 CREATE TABLE IF NOT EXISTS technical_analysis (
@@ -213,6 +215,10 @@ class MarketDataStore:
             connection.execute(
                 "ALTER TABLE scan_results ADD COLUMN timestamp_offset_seconds REAL NOT NULL DEFAULT 0"
             )
+        if "timestamp_configured" not in existing_columns:
+            connection.execute("ALTER TABLE scan_results ADD COLUMN timestamp_configured INTEGER NOT NULL DEFAULT 0")
+        if "timestamp_config_source" not in existing_columns:
+            connection.execute("ALTER TABLE scan_results ADD COLUMN timestamp_config_source TEXT NOT NULL DEFAULT ''")
         technical_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(technical_analysis)")
         }
@@ -312,7 +318,8 @@ class MarketDataStore:
                     "(scan_id, symbol, captured_at, tick_time, bid, ask, spread_points, "
                     "tick_age_seconds, session, eligible, activated, reasons_json, "
                     "candle_counts_json, latest_candle_times_json, effective_tick_time, "
-                    "timestamp_offset_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "timestamp_offset_seconds, timestamp_configured, timestamp_config_source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         scan_id,
                         result.symbol,
@@ -332,6 +339,8 @@ class MarketDataStore:
                         ),
                         result.effective_tick_time.isoformat() if result.effective_tick_time else None,
                         result.timestamp_offset_seconds,
+                        int(result.timestamp_configured),
+                        result.timestamp_config_source,
                     ),
                 )
             return scan_id

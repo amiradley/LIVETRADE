@@ -8,6 +8,7 @@ from typing import Any
 from .scanner import MarketScanner, ScannerConfig
 from .storage import MarketDataStore
 from .technical import TechnicalAnalyzer, analyze_multi_timeframe
+from .timestamping import BrokerTimeConfig
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class ResearchWorker:
         client_lock: threading.RLock,
         interval_seconds: float = 60.0,
         scanner_config: ScannerConfig | None = None,
+        broker_time: BrokerTimeConfig | None = None,
     ) -> None:
         if interval_seconds < 1:
             raise ValueError("Research interval must be at least one second")
@@ -49,7 +51,9 @@ class ResearchWorker:
         self.symbol = symbol.upper()
         self.client_lock = client_lock
         self.interval_seconds = interval_seconds
-        self.scanner_config = scanner_config or ScannerConfig(timeframes=("M1", "M5"), bars=60, max_active_instruments=1)
+        self.scanner_config = scanner_config or ScannerConfig(
+            timeframes=("M1", "M5"), bars=60, max_active_instruments=1, broker_time=broker_time
+        )
         self.analyzer = TechnicalAnalyzer()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None

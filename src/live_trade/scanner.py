@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from .models import Candle, Tick
+from .timestamping import BrokerTimeConfig
 
 
 SUPPORTED_TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
@@ -37,6 +38,9 @@ class ScannerConfig:
     max_tick_age_seconds: float = 60.0
     min_candles: int = 1
     broker_server_utc_offset_seconds: float = 0.0
+    broker_time: BrokerTimeConfig | None = None
+    timestamp_configured: bool = False
+    timestamp_config_source: str = "Unconfigured scanner; future timestamps remain rejected"
 
     def __post_init__(self) -> None:
         normalized = tuple(timeframe.upper() for timeframe in self.timeframes)
@@ -57,6 +61,15 @@ class ScannerConfig:
             raise ValueError("min_candles must be positive")
         object.__setattr__(self, "timeframes", normalized)
         object.__setattr__(self, "required_timeframes", required)
+        if self.broker_time is not None:
+            offset = self.broker_time.utc_offset_seconds
+            object.__setattr__(self, "timestamp_configured", offset is not None)
+            object.__setattr__(self, "timestamp_config_source", self.broker_time.source)
+            if offset is not None:
+                object.__setattr__(self, "broker_server_utc_offset_seconds", offset)
+        elif self.broker_server_utc_offset_seconds != 0:
+            object.__setattr__(self, "timestamp_configured", True)
+            object.__setattr__(self, "timestamp_config_source", "Explicit scanner offset")
 
 
 @dataclass(frozen=True)
@@ -73,6 +86,8 @@ class ScanResult:
     activated: bool
     effective_tick_time: datetime | None = None
     timestamp_offset_seconds: float = 0.0
+    timestamp_configured: bool = False
+    timestamp_config_source: str = "Unconfigured scanner; future timestamps remain rejected"
     reasons: tuple[str, ...] = ()
     candle_counts: Mapping[str, int] = field(default_factory=dict)
     latest_candle_times: Mapping[str, datetime] = field(default_factory=dict)
@@ -144,6 +159,8 @@ class MarketScanner:
                 eligible=False,
                 activated=False,
                 timestamp_offset_seconds=self.config.broker_server_utc_offset_seconds,
+                timestamp_configured=self.config.timestamp_configured,
+                timestamp_config_source=self.config.timestamp_config_source,
                 reasons=tuple(reasons or ["tick_unavailable"]),
             )
 
@@ -162,6 +179,8 @@ class MarketScanner:
             if spread_points > self.config.max_spread_points:
                 reasons.append("spread_above_limit")
         raw_tick_time = _utc(tick.time)
+        if not self.config.timestamp_configured and self.config.broker_time is not None:
+            reasons.append("timestamp_configuration_missing")
         effective_tick_time = raw_tick_time - timedelta(
             seconds=self.config.broker_server_utc_offset_seconds
         )
@@ -183,6 +202,8 @@ class MarketScanner:
             activated=False,
             effective_tick_time=effective_tick_time,
             timestamp_offset_seconds=self.config.broker_server_utc_offset_seconds,
+            timestamp_configured=self.config.timestamp_configured,
+            timestamp_config_source=self.config.timestamp_config_source,
             reasons=tuple(reasons),
         )
 

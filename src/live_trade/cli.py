@@ -11,8 +11,10 @@ from .dashboard import serve_dashboard
 from .finance import FinancialDataService
 from .logging_config import configure_logging
 from .mt5_client import ReadOnlyMt5Client
+from .timestamping import BrokerTimeConfig
 from .scanner import MarketScanner, ScannerConfig
 from .storage import MarketDataStore
+from .storage_manager import StorageManager
 from .technical import TechnicalAnalyzer, analyze_multi_timeframe
 
 
@@ -38,8 +40,8 @@ def _parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--broker-server-offset-hours",
         type=float,
-        default=0.0,
-        help="Explicit verified MT5 server-to-UTC offset; default 0 rejects future timestamps",
+        default=None,
+        help="Override the configured broker server-to-UTC offset for this scan",
     )
 
     analyze = subparsers.add_parser("analyze", help="Analyse numerical OHLC data without trading")
@@ -56,6 +58,7 @@ def _parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--host", default="127.0.0.1")
     dashboard.add_argument("--port", type=int, default=8765)
     dashboard.add_argument("--open-browser", action="store_true")
+    subparsers.add_parser("storage", help="Run a dry-run project storage and retention scan")
     return parser
 
 
@@ -68,8 +71,11 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
     if args.command == "dashboard":
         serve_dashboard(settings, host=args.host, port=args.port, open_browser=args.open_browser)
         return 0
+    if args.command == "storage":
+        _print_json(StorageManager(settings.base_dir).scan().to_dict())
+        return 0
     logger = logging.getLogger(__name__)
-    client = ReadOnlyMt5Client(mt5_path=settings.mt5_path)
+    client = ReadOnlyMt5Client(mt5_path=settings.mt5_path, broker_time=settings.broker_time)
     try:
         client.connect()
         if args.command == "check":
@@ -94,13 +100,19 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
                 }
             )
         elif args.command == "scan":
+            broker_time = settings.broker_time
+            if args.broker_server_offset_hours is not None:
+                broker_time = BrokerTimeConfig.with_offset(
+                    args.broker_server_offset_hours,
+                    source="Explicit CLI scan override",
+                )
             config = ScannerConfig(
                 timeframes=tuple(args.timeframe or ("M1", "M5")),
                 bars=args.bars,
                 max_active_instruments=args.max_active,
                 max_spread_points=args.max_spread_points,
                 max_tick_age_seconds=args.max_tick_age,
-                broker_server_utc_offset_seconds=args.broker_server_offset_hours * 3600,
+                broker_time=broker_time,
             )
             scan_run = MarketScanner(client, config).scan(tuple(args.symbol) if args.symbol else None)
             scan_id = MarketDataStore(settings.db_path).save_scan(scan_run)
@@ -113,7 +125,8 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
                     "eligible_count": sum(result.eligible for result in scan_run.results),
                     "activated_count": sum(result.activated for result in scan_run.results),
                     "timeframes": config.timeframes,
-                    "broker_server_offset_hours": args.broker_server_offset_hours,
+                    "broker_server_offset_hours": broker_time.utc_offset_hours,
+                    "broker_time": broker_time.to_dict(),
                     "rejection_report": report.to_dict(),
                 }
             )

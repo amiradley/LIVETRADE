@@ -4,6 +4,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import webbrowser
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from .mt5_client import ReadOnlyMt5Client
 from .research import ResearchWorker
 from .session import SessionError, SessionMode, SessionState, TradingSessionController
 from .storage import MarketDataStore
+from .storage_manager import StorageManager
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
@@ -189,9 +191,15 @@ class DashboardService:
 
     def __init__(self, settings: Settings, client: Any | None = None) -> None:
         self.settings = settings
-        self.client = client or ReadOnlyMt5Client(mt5_path=settings.mt5_path)
+        self.client = client or ReadOnlyMt5Client(
+            mt5_path=settings.mt5_path,
+            broker_time=settings.broker_time,
+        )
         self.financial = FinancialDataService(self.client)
         self.store = MarketDataStore(settings.db_path)
+        self.storage_manager = StorageManager(settings.base_dir)
+        self._storage_cache: dict[str, Any] | None = None
+        self._storage_cache_at = 0.0
         self.lock = threading.RLock()
         self.client_lock = threading.RLock()
         self.research_worker = ResearchWorker(
@@ -199,6 +207,7 @@ class DashboardService:
             self.store,
             settings.symbols[0] if settings.symbols else "EURUSD",
             self.client_lock,
+            broker_time=settings.broker_time,
         )
         self.intelligence = FinancialIntelligenceService(self.store)
         self.controller = TradingSessionController(
@@ -239,6 +248,7 @@ class DashboardService:
                     "error": None,
                 },
                 "terminal": terminal,
+                "broker_time": self.settings.broker_time.to_dict(),
                 "financial": financial,
                 "history": _history_payload(intelligence),
                 "snapshot_id": snapshot_id,
@@ -300,6 +310,7 @@ class DashboardService:
                         "error": self.last_error,
                     },
                     "terminal": {},
+                    "broker_time": self.settings.broker_time.to_dict(),
                     "financial": None,
                     "snapshot_id": None,
                     "session": _session_payload(self.controller.status, self.controller.component_health()),
@@ -316,6 +327,7 @@ class DashboardService:
                 self.last_successful = {
                     "connection": {"status": "CONNECTED", "broker_verified": True, "error": None},
                     "terminal": self.client.terminal_info(),
+                    "broker_time": self.settings.broker_time.to_dict(),
                     "financial": payload,
                     "history": _history_payload(intelligence),
                     "snapshot_id": snapshot_id,
@@ -396,6 +408,13 @@ class DashboardService:
                 return history
             return {"status": "UNAVAILABLE", "message": "Broker deal history is unavailable.", "results": []}
 
+    def storage(self) -> dict[str, Any]:
+        with self.lock:
+            if self._storage_cache is None or time.monotonic() - self._storage_cache_at >= 60:
+                self._storage_cache = self.storage_manager.scan().to_dict()
+                self._storage_cache_at = time.monotonic()
+            return self._storage_cache
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "LIVE-TRADING-Dashboard/0.1"
@@ -446,6 +465,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send(self.service.analysis())
             if path == "/api/history":
                 return self._send(self.service.history())
+            if path == "/api/storage":
+                return self._send(self.service.storage())
             return self._send({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             LOGGER.exception("Dashboard request failed")

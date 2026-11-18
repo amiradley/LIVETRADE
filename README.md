@@ -44,7 +44,7 @@ python -m live_trade check
 python -m live_trade discover
 python -m live_trade snapshot --symbol EURUSD --timeframe M1 --bars 200
 python -m live_trade scan --symbol EURUSD --timeframe M1 --timeframe M5 --bars 100
-python -m live_trade scan --symbol EURUSD --timeframe M1 --bars 10 --broker-server-offset-hours 2
+python -m live_trade scan --symbol EURUSD --timeframe M1 --bars 10
 python -m live_trade analyze --symbol EURUSD --timeframe M1 --timeframe M5 --bars 200
 python -m live_trade financial
 python -m live_trade dashboard --open-browser
@@ -54,7 +54,7 @@ Repeat `--symbol` for additional instruments. Snapshot data is stored in `data/m
 
 The Phase 2 scanner evaluates all discovered instruments when no `--symbol` filter is provided, but only progressively activates the best candidates for detailed candle retrieval. It currently applies deterministic visibility, trade-mode, weekend-session, tick-freshness, point-size, and spread gates. It does not calculate indicators or execute trades yet.
 
-`--broker-server-offset-hours` is an explicit timestamp interpretation setting, not a future-tick tolerance. The default is zero and future timestamps remain rejected. Use a non-zero value only after comparing raw MT5 tick and candle epochs with the Windows/Python clocks for the active broker terminal.
+The default MetaQuotes-Demo configuration uses the verified UTC+2 broker-server offset recorded in the timestamp configuration. `--broker-server-offset-hours` remains available as an explicit, auditable per-scan override; it is not a future-tick tolerance. Unknown broker servers require an explicit `LIVE_TRADE_BROKER_UTC_OFFSET_HOURS` setting, and raw timestamps remain preserved alongside effective UTC timestamps.
 
 The `analyze` command runs the numerical technical-analysis foundation over OHLC candles and persists indicator, pattern, structure, score, and multi-timeframe records. Confirmed analysis excludes the current forming candle by default; use `--include-live-candle` only for explicitly provisional observations. It remains read-only and does not produce execution decisions.
 
@@ -93,6 +93,7 @@ The tests use a mocked MT5 API and do not connect to a broker or place trades.
 - No AI trade decisions.
 - No technical-analysis or news claims.
 - No hardcoded credentials.
-- Market timestamps are normalized to UTC; retrieval time is captured separately as the snapshot timestamp.
+- Market timestamps preserve the raw MT5 epoch and use the central broker-time configuration for effective UTC validation. Retrieval time is captured separately as the snapshot timestamp.
+- `python -m live_trade storage` performs a dry-run-only retention scan. Protected SQLite/source/configuration files are never cleanup candidates; temporary files are reviewed after 7 days, diagnostic logs after 30 days, and research archives after 90 days. The dashboard exposes the same report without destructive actions.
 
 Later phases should add analysis and paper trading only after the read-only data path is stable and observable.

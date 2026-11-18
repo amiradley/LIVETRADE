@@ -50,7 +50,7 @@ The dashboard refreshes broker financial values through a short-lived MT5 read c
 
 ## Stage 1.6A health and runtime integration
 
-The demo-shadow START transition now owns a daemon research worker that runs the read-only scanner, closed-candle technical analysis, and market-monitoring cycle under a client lock. Component health exposes cycle count, thread liveness, last completion, and last error. STOP signals and joins the worker before the final financial snapshot; a failed active-session read transitions to `ERROR` and marks the persisted session record accordingly rather than claiming `RUNNING`. Broker timestamp offsets remain explicit scanner configuration; a zero default intentionally preserves future-tick rejection until a verified offset is supplied.
+The demo-shadow START transition now owns a daemon research worker that runs the read-only scanner, closed-candle technical analysis, and market-monitoring cycle under a client lock. Component health exposes cycle count, thread liveness, last completion, and last error. STOP signals and joins the worker before the final financial snapshot; a failed active-session read transitions to `ERROR` and marks the persisted session record accordingly rather than claiming `RUNNING`. Broker time is centralized in `BrokerTimeConfig`; the verified MetaQuotes-Demo UTC+2 configuration is passed to the scanner and worker, while unknown brokers remain unconfigured and reject timestamp validation until explicitly configured.
 
 ## Phase 2 scanner foundation
 
@@ -60,7 +60,9 @@ The first scanner increment supports M1, M5, M15, M30, H1, H4, and D1 retrieval 
 
 Future-dated tick timestamps are intentionally rejected. MT5/broker server clock offsets must be measured and supplied as explicit, audited configuration before any offset-aware activation is allowed; the scanner must not silently reinterpret timestamps.
 
-The current MetaQuotes-Demo observation measured a stable two-hour offset: raw tick and M1 candle epochs both converted to UTC were two hours ahead of the Python UTC clock, while Windows local time was UTC+08:00. The scanner can therefore be run with `--broker-server-offset-hours 2` for this verified terminal context; leaving the option at its default of zero preserves strict rejection until the offset is verified again.
+The current MetaQuotes-Demo observation measured a stable two-hour offset: raw tick and M1 candle epochs both converted to UTC were two hours ahead of the Python UTC clock, while Windows local time was UTC+08:00. This is recorded as an auditable project default; the CLI override remains available for a separately verified terminal context. Scan records persist the offset, configuration state, and source used for interpretation.
+
+The Storage Manager is a dry-run-only project health and retention report. It reports disk thresholds at 70%, 85%, and 90%, protects the database and application files, and classifies temporary, diagnostic, archive, and unclassified files for review. `python -m live_trade storage` and the dashboard Storage Manager page never delete files; every scan is appended to the storage audit log.
 
 ## Phase 2.2 technical-analysis foundation
 

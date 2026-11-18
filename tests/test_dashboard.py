@@ -27,6 +27,18 @@ def test_dashboard_exposes_verified_financial_fields(tmp_path, fake_mt5, monkeyp
     assert overview["financial"]["floating_pnl"]["status"] == "INTERNALLY_CALCULATED"
     assert overview["financial"]["currency_conversion"]["status"] == "UNAVAILABLE"
     assert overview["financial"]["position_count"] == 0
+    assert overview["broker_time"]["utc_offset_hours"] == 2.0
+
+
+def test_dashboard_storage_report_is_dry_run(tmp_path, fake_mt5):
+    from live_trade.mt5_client import ReadOnlyMt5Client
+
+    service = DashboardService(dashboard_settings(tmp_path), client=ReadOnlyMt5Client(api=fake_mt5))
+    report = service.storage()
+
+    assert report["dry_run"] is True
+    assert report["project_size_bytes"] >= 0
+    assert report["sqlite_size_bytes"] >= 0
 
 
 def test_dashboard_start_stop_and_duplicate_prevention(tmp_path, fake_mt5, monkeypatch):

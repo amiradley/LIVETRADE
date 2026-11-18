@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from .timestamping import BrokerTimeConfig
 
 
 def _optional_path(value: str | None, base_dir: Path) -> Path | None:
@@ -19,6 +21,7 @@ class Settings:
     db_path: Path
     log_path: Path
     symbols: tuple[str, ...]
+    broker_time: BrokerTimeConfig = field(default_factory=BrokerTimeConfig.from_environment)
     default_bars: int = 200
 
 
@@ -45,5 +48,6 @@ def load_settings(base_dir: Path | None = None) -> Settings:
         db_path=db_path,
         log_path=log_path,
         symbols=symbols,
+        broker_time=BrokerTimeConfig.from_environment(),
         default_bars=default_bars,
     )
