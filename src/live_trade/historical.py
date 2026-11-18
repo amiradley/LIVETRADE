@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .instrument_intelligence import classify_instrument, priority_for
 from .models import Candle
+from .mt5_client import Mt5Error
 from .storage import MarketDataStore
 from .storage_manager import StorageManager
 from .timestamping import BrokerTimeConfig, TimestampConfigurationError
@@ -27,6 +28,7 @@ TIMEFRAME_TARGETS = {
     "D1": {"INITIAL": 500, "INTERMEDIATE": 2_000, "EXTENDED": 8_000},
 }
 TIMEFRAME_COLLECTION_PRIORITY = ("H1", "M15", "M5", "M30", "H4", "D1", "M1")
+TRANSIENT_MT5_ERROR_CODES = {-1, -10004, -10005, -10006, -10007}
 
 
 def target_for(timeframe: str, level: str = "INITIAL") -> int:
@@ -51,6 +53,23 @@ def research_readiness(candle_count: int, timeframe: str, data_quality: str, gap
 
 def _utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _raw_time(candle: Candle) -> datetime:
+    return _utc(candle.time)
+
+
+def _effective_time(candle: Candle, broker_time: BrokerTimeConfig) -> datetime:
+    return broker_time.effective_utc(_raw_time(candle))
+
+
+def _is_complete(candle: Candle, timeframe: str, broker_time: BrokerTimeConfig, captured_at: datetime) -> bool:
+    return _effective_time(candle, broker_time) + timedelta(minutes=TIMEFRAME_MINUTES[timeframe.upper()]) <= _utc(captured_at)
+
+
+def _error_details(exc: Exception) -> dict[str, Any]:
+    details = getattr(exc, "details", None)
+    return details if isinstance(details, dict) else {}
 
 
 @dataclass(frozen=True)
@@ -103,6 +122,8 @@ def validate_candles(
     issues: list[dict[str, Any]] = []
     effective_times: list[datetime] = []
     seen: set[datetime] = set()
+    first_by_time: dict[datetime, Candle] = {}
+    first_index_by_time: dict[datetime, int] = {}
     duplicate_count = 0
     invalid_count = 0
     timestamp_integrity = "VALID"
@@ -116,8 +137,12 @@ def validate_candles(
         effective_times.append(effective)
         if effective in seen:
             duplicate_count += 1
-            issues.append({"index": index, "code": "duplicate_candle"})
+            first = first_by_time[effective]
+            conflicting = (first.open, first.high, first.low, first.close, first.tick_volume) != (candle.open, candle.high, candle.low, candle.close, candle.tick_volume)
+            issues.append({"index": index, "code": "duplicate_candle", "first_index": first_index_by_time[effective], "conflicting_ohlc": conflicting})
         seen.add(effective)
+        first_by_time.setdefault(effective, candle)
+        first_index_by_time.setdefault(effective, index)
         if index and effective <= effective_times[index - 1]:
             timestamp_integrity = "OUT_OF_ORDER"
             issues.append({"index": index, "code": "out_of_order"})
@@ -245,34 +270,152 @@ class HistoricalDataEngine:
         self.store.save_instrument_classifications(classifications)
         return self.store.instrument_summary()
 
+    def _save_page_diagnostic(
+        self,
+        *,
+        job_id: int | None,
+        symbol: str,
+        timeframe: str,
+        request: dict[str, Any],
+        candles: Sequence[Candle] = (),
+        accepted: Sequence[Candle] = (),
+        quality: QualityReport | None = None,
+        retry_count: int = 0,
+        duration_ms: float | None = None,
+        result: str = "SUCCESS",
+        message: str = "",
+        overlap_count: int = 0,
+        error: dict[str, Any] | None = None,
+    ) -> int:
+        raw_times = [_raw_time(candle) for candle in candles]
+        try:
+            effective_times = [_effective_time(candle, self.broker_time) for candle in candles] if candles else []
+        except TimestampConfigurationError:
+            effective_times = []
+        mt5_error = (error or {}).get("mt5_error") or {}
+        return self.store.save_collection_batch_diagnostic({
+            "job_id": job_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol.upper(),
+            "timeframe": timeframe.upper(),
+            "request_type": request.get("request_type", "UNKNOWN"),
+            "start_position": request.get("start_position"),
+            "requested_from": request.get("from"),
+            "requested_to": request.get("to"),
+            "batch_size": int(request.get("count", len(candles) or 0)),
+            "returned_count": len(candles),
+            "accepted_count": len(accepted),
+            "first_raw_time": raw_times[0].isoformat() if raw_times else None,
+            "last_raw_time": raw_times[-1].isoformat() if raw_times else None,
+            "first_effective_time": effective_times[0].isoformat() if effective_times else None,
+            "last_effective_time": effective_times[-1].isoformat() if effective_times else None,
+            "duplicate_count": quality.duplicate_count if quality else 0,
+            "overlap_count": overlap_count,
+            "gap_count": quality.gap_count if quality else 0,
+            "out_of_order_count": sum(1 for issue in (quality.issues if quality else ()) if issue.get("code") == "out_of_order"),
+            "forming_count": len(candles) - len(accepted),
+            "quality_status": quality.data_quality if quality else ("ERROR" if error else "UNKNOWN"),
+            "retry_count": retry_count,
+            "duration_ms": duration_ms,
+            "mt5_error_code": mt5_error.get("code", mt5_error.get("value", [None])[0] if isinstance(mt5_error.get("value"), list) else None),
+            "mt5_error_description": mt5_error.get("description", mt5_error.get("value", [None, None])[1] if isinstance(mt5_error.get("value"), list) and len(mt5_error.get("value")) > 1 else None),
+            "result": result,
+            "message": message,
+            "provenance": {"broker_server": self.broker_time.server_name, "timestamp_source": self.broker_time.source, "pagination_method": "TIME_ANCHORED"},
+        })
+
+    def _retrieve_pages(
+        self,
+        symbol: str,
+        timeframe: str,
+        bars: int,
+        max_batches: int,
+        *,
+        job_id: int | None = None,
+        start_cursor: datetime | None = None,
+    ) -> list[tuple[Candle, ...]]:
+        pages: list[tuple[Candle, ...]] = []
+        cursor = start_cursor
+        seen_page_keys: set[datetime] = set()
+        for _ in range(max_batches):
+            request = {"request_type": "TIME_RANGE" if cursor else "POSITION", "count": bars}
+            if cursor is None:
+                request["start_position"] = 0
+            started = time.perf_counter()
+            candles: tuple[Candle, ...] = ()
+            retries = 0
+            last_error: Exception | None = None
+            for attempt in range(3):
+                try:
+                    if cursor is None:
+                        candles = self.client.get_candles_batch(symbol, timeframe, 0, bars)
+                    else:
+                        candles = self.client.get_candles_before(symbol, timeframe, cursor, bars)
+                        interval_minutes = TIMEFRAME_MINUTES[timeframe.upper()]
+                        request["to"] = (cursor - timedelta(minutes=interval_minutes)).isoformat()
+                        request["from"] = (cursor - timedelta(minutes=interval_minutes * (max(bars * 4, bars + 24) + 1))).isoformat()
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    details = _error_details(exc)
+                    raw_error = details.get("mt5_error") or {}
+                    value = raw_error.get("value") if isinstance(raw_error, dict) else None
+                    code = value[0] if isinstance(value, (list, tuple)) and value else raw_error.get("code") if isinstance(raw_error, dict) else None
+                    if attempt >= 2 or code not in TRANSIENT_MT5_ERROR_CODES:
+                        break
+                    retries += 1
+                    time.sleep(0.1 * (attempt + 1))
+            duration_ms = (time.perf_counter() - started) * 1000
+            if last_error is not None:
+                details = _error_details(last_error)
+                self._save_page_diagnostic(job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, retry_count=retries, duration_ms=duration_ms, result="FAILED", message=str(last_error), error=details)
+                raise last_error
+            if not candles:
+                self._save_page_diagnostic(job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, retry_count=retries, duration_ms=duration_ms, result="EMPTY", message="MT5 returned an empty page")
+                break
+            raw_times = [_raw_time(candle) for candle in candles]
+            out_of_order = sum(1 for left, right in zip(raw_times, raw_times[1:]) if right <= left)
+            keys = set(raw_times)
+            overlap_keys = keys & seen_page_keys
+            if cursor is not None:
+                overlap_keys.update(value for value in raw_times if value >= cursor)
+            overlap = len(overlap_keys)
+            quality = validate_candles(symbol, timeframe, candles, self.broker_time)
+            try:
+                accepted = tuple(candle for candle in candles if _is_complete(candle, timeframe, self.broker_time, datetime.now(timezone.utc)))
+            except TimestampConfigurationError as exc:
+                self._save_page_diagnostic(job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, candles=candles, quality=quality, retry_count=retries, duration_ms=duration_ms, result="REJECTED", message=str(exc))
+                raise
+            if out_of_order or overlap:
+                self._save_page_diagnostic(job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, candles=candles, accepted=accepted, quality=quality, retry_count=retries, duration_ms=duration_ms, result="REJECTED", message="Historical page ordering or boundary overlap is ambiguous", overlap_count=overlap)
+                raise ValueError(f"Ambiguous historical page for {symbol} {timeframe}: out_of_order={out_of_order}, overlap={overlap}")
+            self._save_page_diagnostic(job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, candles=candles, accepted=accepted, quality=quality, retry_count=retries, duration_ms=duration_ms)
+            pages.append(candles)
+            seen_page_keys.update(keys)
+            cursor = min(raw_times)
+            if len(candles) < bars:
+                break
+        return pages
+
     def audit(self, symbols: Sequence[str], timeframes: Sequence[str], bars: int = 200, full_depth: bool = False, max_batches: int = 10, target_level: str = "INITIAL") -> list[QualityReport]:
         reports: list[QualityReport] = []
         for symbol in symbols:
             for timeframe in timeframes:
                 try:
-                    if full_depth:
-                        batches = []
-                        for batch_number in range(max_batches):
-                            batch = self.client.get_candles_batch(symbol, timeframe, batch_number * bars, bars)
-                            if not batch:
-                                break
-                            batches.append(batch)
-                            if len(batch) < bars:
-                                break
-                        candles = tuple(candle for batch in reversed(batches) for candle in batch)
-                    else:
-                        candles = self.client.get_candles(symbol, timeframe, bars)
+                    pages = self._retrieve_pages(symbol, timeframe, bars, max_batches if full_depth else 1)
+                    candles = tuple(candle for page in reversed(pages) for candle in page)
                     report = validate_candles(symbol, timeframe, candles, self.broker_time)
                     local_count = self.store.historical_summary_for(symbol, timeframe)["candles"]
                     self.store.save_coverage({
                         **report.to_dict(),
                         "audited_at": datetime.now(timezone.utc).isoformat(),
-                        "metadata": {"audit_scope": "paged_history" if full_depth else "latest_batch", "requested_bars": bars, "batches": max_batches if full_depth else 1, "history_more_available": len(candles) >= bars * (max_batches if full_depth else 1)},
+                        "metadata": {"audit_scope": "time_anchored_history" if full_depth else "latest_batch", "requested_bars": bars, "batches": len(pages), "history_more_available": len(candles) >= bars * (max_batches if full_depth else 1)},
                         "local_candle_count": local_count,
                         "broker_candle_count": len(candles), "target_count": target_for(timeframe, target_level), "target_level": target_level,
                         "source_status": "AVAILABLE" if candles else "NO_HISTORY", "dataset_version": f"{symbol.upper()}-{timeframe.upper()}-{len(candles)}",
                         "research_readiness": research_readiness(local_count, timeframe, report.data_quality, report.gap_count, target_level),
-                        "provenance": {"broker_server": self.broker_time.server_name, "timestamp_source": self.broker_time.source, "collector": "HistoricalDataEngine", "full_depth": full_depth},
+                        "provenance": {"broker_server": self.broker_time.server_name, "timestamp_source": self.broker_time.source, "collector": "HistoricalDataEngine", "full_depth": full_depth, "pagination_method": "TIME_ANCHORED"},
                     })
                 except Exception as exc:
                     report = QualityReport(symbol, timeframe, 0, 0, None, None, 0, 0, 0, "ERROR", False, "ERROR", "NOT_COLLECTED", ({"code": "retrieval_error", "message": str(exc)},))
@@ -315,30 +458,51 @@ class HistoricalDataEngine:
                 self.store.collection_event(job["job_id"], "PAUSED_STORAGE", "Collection paused at the 90% disk threshold", now, storage.to_dict())
                 paused = True
                 continue
-            self.store.update_collection_job(job["job_id"], now, status="RUNNING", attempts=int(job["attempts"]) + 1, last_error=None)
+            attempt_time = datetime.now(timezone.utc)
+            self.store.update_collection_job(job["job_id"], attempt_time, status="RUNNING", attempts=int(job["attempts"]) + 1, last_error=None, last_attempt_at=attempt_time.isoformat(), pagination_method="TIME_ANCHORED")
             try:
                 remaining = max(0, int(job["target_bars"]) - int(job["downloaded_bars"]))
                 if remaining == 0:
-                    self.store.update_collection_job(job["job_id"], now, status="COMPLETE")
+                    self.store.update_collection_job(job["job_id"], attempt_time, status="COMPLETE", last_successful_at=attempt_time.isoformat())
                     continue
                 count = min(batch_size, remaining)
-                candles = self.client.get_candles_batch(job["symbol"], job["timeframe"], int(job["next_start_position"]), count)
-                if not candles:
-                    self.store.update_collection_job(job["job_id"], now, status="FAILED", last_error="MT5 returned no candles")
-                    self.store.collection_event(job["job_id"], "FAILED", "MT5 returned no candles", now)
+                cursor = datetime.fromisoformat(job["next_start_time"]) if job.get("next_start_time") else None
+                if cursor is None and int(job["downloaded_bars"]) > 0:
+                    bounds = self.store.historical_bounds(job["symbol"], job["timeframe"])
+                    if bounds.get("earliest_raw"):
+                        cursor = datetime.fromisoformat(str(bounds["earliest_raw"]))
+                pages = self._retrieve_pages(job["symbol"], job["timeframe"], count, 1, job_id=int(job["job_id"]), start_cursor=cursor)
+                if not pages:
+                    message = "MT5 returned no candles"
+                    self.store.update_collection_job(job["job_id"], attempt_time, status="FAILED", last_error=message)
+                    self.store.collection_event(job["job_id"], "FAILED", message, attempt_time, {"symbol": job["symbol"], "timeframe": job["timeframe"], "requested_bars": count})
                     continue
-                quality = validate_candles(job["symbol"], job["timeframe"], candles, self.broker_time)
+                candles = pages[0]
+                captured_at = datetime.now(timezone.utc)
+                accepted = tuple(candle for candle in candles if _is_complete(candle, job["timeframe"], self.broker_time, captured_at))
+                if not accepted:
+                    message = "Only forming candles were returned; no research candle was persisted"
+                    self.store.update_collection_job(job["job_id"], attempt_time, status="FAILED", last_error=message)
+                    self.store.collection_event(job["job_id"], "FORMING_ONLY", message, attempt_time, {"received": len(candles)})
+                    continue
+                quality = validate_candles(job["symbol"], job["timeframe"], accepted, self.broker_time, captured_at)
                 records = []
-                collected_at = datetime.now(timezone.utc).isoformat()
-                for candle in candles:
-                    effective = self.broker_time.effective_utc(_utc(candle.time))
+                collected_at = captured_at.isoformat()
+                for candle in accepted:
+                    effective = _effective_time(candle, self.broker_time)
                     records.append({
-                        "symbol": candle.symbol, "timeframe": candle.timeframe, "raw_time": _utc(candle.time).isoformat(),
+                        "symbol": candle.symbol, "timeframe": candle.timeframe, "raw_time": _raw_time(candle).isoformat(),
                         "effective_time": effective.isoformat(), "open": candle.open, "high": candle.high, "low": candle.low,
                         "close": candle.close, "tick_volume": candle.tick_volume, "spread": candle.spread, "real_volume": candle.real_volume,
-                        "quality_status": quality.data_quality, "quality_reasons": [issue.get("code") for issue in quality.issues], "collected_at": collected_at,
+                        "quality_status": "VALID" if quality.data_quality == "VALID_LATEST_INCOMPLETE" else quality.data_quality,
+                        "quality_reasons": [issue.get("code") for issue in quality.issues], "collected_at": collected_at,
                     })
                 saved = self.store.save_historical_candles(records)
+                if saved != len(records):
+                    message = f"Persistence rejected {len(records) - saved} already-present candle(s); page was not advanced"
+                    self.store.update_collection_job(job["job_id"], attempt_time, status="FAILED", last_error=message)
+                    self.store.collection_event(job["job_id"], "DUPLICATE_PERSISTENCE", message, attempt_time, {"received": len(candles), "accepted": len(records), "saved": saved})
+                    continue
                 local = self.store.historical_summary_for(job["symbol"], job["timeframe"])
                 self.store.save_coverage({
                     **quality.to_dict(),
@@ -350,18 +514,20 @@ class HistoricalDataEngine:
                     "source_status": "COLLECTED",
                     "dataset_version": f"{job['symbol']}-{job['timeframe']}-{local['candles']}",
                     "research_readiness": research_readiness(local["candles"], job["timeframe"], quality.data_quality, quality.gap_count, job.get("target_level", "INITIAL")),
-                    "metadata": {"audit_scope": "collected_batches", "quality_batch_count": len(candles)},
-                    "provenance": {"broker_server": self.broker_time.server_name, "timestamp_source": self.broker_time.source, "collector": "HistoricalDataEngine", "collection_job_id": job["job_id"]},
+                    "metadata": {"audit_scope": "collected_batches", "quality_batch_count": len(candles), "forming_excluded": len(candles) - len(accepted)},
+                    "provenance": {"broker_server": self.broker_time.server_name, "timestamp_source": self.broker_time.source, "collector": "HistoricalDataEngine", "collection_job_id": job["job_id"], "pagination_method": "TIME_ANCHORED"},
                 })
-                downloaded = int(job["downloaded_bars"]) + len(candles)
+                downloaded = int(job["downloaded_bars"]) + len(accepted)
                 status = "COMPLETE" if downloaded >= int(job["target_bars"]) else "QUEUED"
-                self.store.update_collection_job(job["job_id"], now, downloaded_bars=downloaded, next_start_position=int(job["next_start_position"]) + len(candles), status=status)
-                self.store.collection_event(job["job_id"], "BATCH_SAVED", f"Saved {saved} new historical candles", now, {"received": len(candles), "saved": saved, "quality": quality.to_dict()})
+                next_cursor = min(_raw_time(candle) for candle in candles)
+                completed_at = datetime.now(timezone.utc)
+                self.store.update_collection_job(job["job_id"], completed_at, downloaded_bars=downloaded, next_start_position=int(job["next_start_position"]) + len(accepted), next_start_time=next_cursor.isoformat(), status=status, last_successful_at=completed_at.isoformat())
+                self.store.collection_event(job["job_id"], "BATCH_SAVED", f"Saved {saved} new historical candles; forming candles excluded: {len(candles) - len(accepted)}", completed_at, {"received": len(candles), "accepted": len(accepted), "saved": saved, "quality": quality.to_dict(), "next_start_time": next_cursor.isoformat()})
                 batches += 1
                 time.sleep(max(0.0, rate_limit_seconds))
             except Exception as exc:
-                self.store.update_collection_job(job["job_id"], now, status="FAILED", last_error=str(exc))
-                self.store.collection_event(job["job_id"], "FAILED", str(exc), now)
+                self.store.update_collection_job(job["job_id"], attempt_time, status="FAILED", last_error=str(exc))
+                self.store.collection_event(job["job_id"], "FAILED", str(exc), attempt_time, {"error": _error_details(exc), "symbol": job["symbol"], "timeframe": job["timeframe"]})
         return {"job_ids": job_ids, "batches": batches, "paused_for_storage": paused, "jobs": self.store.collection_jobs(), "historical": self.store.historical_summary()}
 
 

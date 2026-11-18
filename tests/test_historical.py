@@ -75,6 +75,10 @@ def test_engine_audit_and_collection_are_persisted_and_resumable(tmp_path, fake_
             "spread": 2, "real_volume": 0,
         }]
     fake_mt5.copy_rates_from_pos = batch
+    fake_mt5.copy_rates_range = lambda symbol, timeframe, date_from, date_to: [{
+        "time": int(date_to.timestamp()), "open": 1.1, "high": 1.101, "low": 1.099, "close": 1.1005,
+        "tick_volume": 42, "spread": 2, "real_volume": 0,
+    }]
     plan = [CollectionPlanItem("EURUSD", "M1", "TIER1", 120, 2, 192)]
     result = engine.collect(plan, max_batches=1, batch_size=1, rate_limit_seconds=0)
     second = engine.collect(plan, max_batches=1, batch_size=1, rate_limit_seconds=0)
@@ -97,6 +101,16 @@ def test_full_depth_audit_pages_older_mt5_batches(tmp_path, fake_mt5):
         "time": int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()) - start * 60,
         "open": 1.1, "high": 1.101, "low": 1.099, "close": 1.1005, "tick_volume": 42, "spread": 2, "real_volume": 0,
     }] if start < 3 else []
+    range_calls = {"count": 0}
+    def range_batch(symbol, timeframe, date_from, date_to):
+        range_calls["count"] += 1
+        if range_calls["count"] > 2:
+            return []
+        return [{
+            "time": int(date_to.timestamp()), "open": 1.1, "high": 1.101, "low": 1.099, "close": 1.1005,
+            "tick_volume": 42, "spread": 2, "real_volume": 0,
+        }]
+    fake_mt5.copy_rates_range = range_batch
     engine = HistoricalDataEngine(client, store, BrokerTimeConfig.metaquotes_demo_default(), tmp_path)
 
     reports = engine.audit(("EURUSD",), ("M1",), bars=1, full_depth=True, max_batches=5)
@@ -121,3 +135,78 @@ def test_collection_scheduler_persists_pause_resume_cancel(tmp_path):
     assert store.collection_jobs()[0]["status"] == "QUEUED"
     scheduler.cancel()
     assert store.collection_jobs()[0]["status"] == "CANCELLED"
+
+
+def test_time_anchored_paging_rejects_boundary_overlap_and_preserves_evidence(tmp_path, fake_mt5):
+    store = MarketDataStore(tmp_path / "market.sqlite3")
+    client = ReadOnlyMt5Client(api=fake_mt5)
+    client.connect()
+    base = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
+    fake_mt5.copy_rates_from_pos = lambda symbol, timeframe, start, count: [{
+        "time": base, "open": 1.1, "high": 1.101, "low": 1.099, "close": 1.1005, "tick_volume": 42,
+        "spread": 2, "real_volume": 0,
+    }]
+    fake_mt5.copy_rates_range = lambda symbol, timeframe, date_from, date_to: [{
+        "time": base, "open": 1.1, "high": 1.101, "low": 1.099, "close": 1.1005, "tick_volume": 42,
+        "spread": 2, "real_volume": 0,
+    }]
+    engine = HistoricalDataEngine(client, store, BrokerTimeConfig.with_offset(0), tmp_path)
+
+    report = engine.audit(("EURUSD",), ("M1",), bars=1, full_depth=True, max_batches=2)[0]
+
+    assert report.data_quality == "ERROR"
+    with store.connect() as connection:
+        row = connection.execute("SELECT result, overlap_count FROM collection_batch_diagnostics ORDER BY batch_id DESC LIMIT 1").fetchone()
+    assert tuple(row) == ("REJECTED", 1)
+
+
+def test_collection_excludes_forming_candle_and_records_count(tmp_path, fake_mt5):
+    store = MarketDataStore(tmp_path / "market.sqlite3")
+    broker_time = BrokerTimeConfig.with_offset(2)
+    client = ReadOnlyMt5Client(api=fake_mt5)
+    client.connect()
+    now = datetime.now(timezone.utc)
+    complete_effective = now - __import__("datetime").timedelta(minutes=3)
+    forming_effective = now - __import__("datetime").timedelta(minutes=0, seconds=10)
+    def row(value):
+        return {
+            "time": int((value + __import__("datetime").timedelta(hours=2)).timestamp()),
+            "open": 1.1, "high": 1.101, "low": 1.099, "close": 1.1005, "tick_volume": 42,
+            "spread": 2, "real_volume": 0,
+        }
+    fake_mt5.copy_rates_from_pos = lambda symbol, timeframe, start, count: [row(complete_effective), row(forming_effective)]
+    engine = HistoricalDataEngine(client, store, broker_time, tmp_path)
+
+    result = engine.collect([CollectionPlanItem("EURUSD", "M1", "TIER1", 120, 2, 192)], max_batches=1, batch_size=2, rate_limit_seconds=0)
+
+    assert result["batches"] == 1
+    assert store.historical_summary()["candles"] == 1
+    diagnostic = store.recent_collection_batch_diagnostics(1)[0]
+    assert diagnostic["forming_count"] == 1
+    assert diagnostic["accepted_count"] == 1
+
+
+def test_transient_mt5_failure_retries_and_records_error_evidence(tmp_path, fake_mt5):
+    store = MarketDataStore(tmp_path / "market.sqlite3")
+    client = ReadOnlyMt5Client(api=fake_mt5)
+    client.connect()
+    calls = {"count": 0}
+    def batch(symbol, timeframe, start, count):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            fake_mt5.last_error = lambda: (-1, "Terminal: Call failed")
+            return None
+        fake_mt5.last_error = lambda: (1, "Success")
+        return [{
+            "time": int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()), "open": 1.1, "high": 1.101,
+            "low": 1.099, "close": 1.1005, "tick_volume": 42, "spread": 2, "real_volume": 0,
+        }]
+    fake_mt5.copy_rates_from_pos = batch
+    engine = HistoricalDataEngine(client, store, BrokerTimeConfig.with_offset(0), tmp_path)
+
+    result = engine.collect([CollectionPlanItem("EURUSD", "M1", "TIER1", 120, 1, 96)], max_batches=1, batch_size=1, rate_limit_seconds=0)
+
+    assert result["batches"] == 1
+    diagnostic = store.recent_collection_batch_diagnostics(1)[0]
+    assert diagnostic["retry_count"] == 1
+    assert calls["count"] == 2

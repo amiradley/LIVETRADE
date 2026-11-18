@@ -427,6 +427,8 @@ class DashboardService:
                 "coverage": self.store.coverage_summary(),
                 "collection": self.collection_scheduler.status(),
                 "historical": self.store.historical_summary(),
+                "batch_diagnostics": self.store.recent_collection_batch_diagnostics(20),
+                "timestamp_configuration": self.settings.broker_time.to_dict(),
                 "storage": self.storage(),
             }
 

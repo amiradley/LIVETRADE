@@ -82,6 +82,14 @@ The instrument catalog stores priority tier, score, and reason. Tier 1 is capped
 
 The Stage 1.8 pilot remains bounded and read-only. Collection continues only while explicitly started by the CLI or dashboard, persists progress and retry errors, and pauses at the storage threshold. Higher-timeframe coverage is prioritized before broad M1 expansion; invalid or overlapping MT5 pages remain quarantined for investigation instead of being silently repaired. A `READY_FOR_*` state describes data sufficiency and structural quality only, never profitability or permission to trade.
 
+## Stage 1.8A MT5 paging reliability
+
+The historical collector uses a position request only for the newest bounded page. Older pages are requested by an explicit broker-time range ending strictly before the previous page's oldest raw timestamp. This avoids moving `start_position` boundaries when the current forming candle changes. Pages must be ascending internally, strictly older than their cursor, and disjoint from all earlier pages. Empty, partial, repeated, overlapping, or out-of-order pages remain observable and are not silently repaired.
+
+`collection_batch_diagnostics` is the persisted observability boundary for this process. It records request type and range/position, raw and effective timestamps, returned and accepted counts, forming candles, quality findings, retry count, duration, MT5 error information, result, and provenance. Jobs retain the time cursor, pagination method, attempt timestamps, and last successful timestamp so a queued collection can resume without reusing a moving positional offset. The retry budget is finite and applies only to known transient MT5 error codes.
+
+MT5 raw epoch labels remain preserved as broker-time labels. For the verified MetaQuotes-Demo configuration, effective UTC is calculated once by subtracting UTC+2; live tick and historical candle checks use the same conversion. The collector excludes incomplete current candles from research persistence by default. Existing records are not deleted or rewritten, and a structural `READY` or `READY_FOR_*` state remains distinct from research validity or strategy validation.
+
 ## Stages 1.9–2.1 research intelligence
 
 `research_intelligence.py` is the unified research layer. `generate_hypotheses` creates stable, reproducible definitions for momentum, mean-reversion, breakout, and volatility families. Each hypothesis stores rationale, variables, signal timing, version, and falsification criteria. Experiments reference the existing `historical_candles` table rather than duplicating OHLC data.

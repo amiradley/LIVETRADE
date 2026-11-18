@@ -282,9 +282,13 @@ CREATE TABLE IF NOT EXISTS collection_jobs (
     target_level TEXT NOT NULL DEFAULT 'INITIAL',
     downloaded_bars INTEGER NOT NULL DEFAULT 0,
     next_start_position INTEGER NOT NULL DEFAULT 0,
+    next_start_time TEXT,
+    pagination_method TEXT NOT NULL DEFAULT 'TIME_ANCHORED',
     status TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
+    last_attempt_at TEXT,
+    last_successful_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(symbol, timeframe, tier)
@@ -298,6 +302,38 @@ CREATE TABLE IF NOT EXISTS collection_events (
     message TEXT NOT NULL,
     payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS collection_batch_diagnostics (
+    batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER,
+    created_at TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    request_type TEXT NOT NULL,
+    start_position INTEGER,
+    requested_from TEXT,
+    requested_to TEXT,
+    batch_size INTEGER NOT NULL,
+    returned_count INTEGER NOT NULL DEFAULT 0,
+    accepted_count INTEGER NOT NULL DEFAULT 0,
+    first_raw_time TEXT,
+    last_raw_time TEXT,
+    first_effective_time TEXT,
+    last_effective_time TEXT,
+    duplicate_count INTEGER NOT NULL DEFAULT 0,
+    overlap_count INTEGER NOT NULL DEFAULT 0,
+    gap_count INTEGER NOT NULL DEFAULT 0,
+    out_of_order_count INTEGER NOT NULL DEFAULT 0,
+    forming_count INTEGER NOT NULL DEFAULT 0,
+    quality_status TEXT NOT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    duration_ms REAL,
+    mt5_error_code INTEGER,
+    mt5_error_description TEXT,
+    result TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    provenance_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_collection_batch_diag_job ON collection_batch_diagnostics(job_id, batch_id);
 CREATE TABLE IF NOT EXISTS research_hypotheses (
     hypothesis_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -438,6 +474,14 @@ class MarketDataStore:
         job_columns = {row[1] for row in connection.execute("PRAGMA table_info(collection_jobs)")}
         if "target_level" not in job_columns:
             connection.execute("ALTER TABLE collection_jobs ADD COLUMN target_level TEXT NOT NULL DEFAULT 'INITIAL'")
+        for name, definition in {
+            "next_start_time": "TEXT",
+            "pagination_method": "TEXT NOT NULL DEFAULT 'TIME_ANCHORED'",
+            "last_attempt_at": "TEXT",
+            "last_successful_at": "TEXT",
+        }.items():
+            if name not in job_columns:
+                connection.execute(f"ALTER TABLE collection_jobs ADD COLUMN {name} {definition}")
         technical_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(technical_analysis)")
         }
@@ -983,9 +1027,9 @@ class MarketDataStore:
             for item in items:
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO collection_jobs "
-                    "(symbol, timeframe, tier, priority, target_bars, target_level, status, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?)",
-                    (item["symbol"], item["timeframe"], item["tier"], item["priority"], item["target_bars"], item.get("target_level", "INITIAL"), now.isoformat(), now.isoformat()),
+                "(symbol, timeframe, tier, priority, target_bars, target_level, status, pagination_method, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?)",
+                    (item["symbol"], item["timeframe"], item["tier"], item["priority"], item["target_bars"], item.get("target_level", "INITIAL"), item.get("pagination_method", "TIME_ANCHORED"), now.isoformat(), now.isoformat()),
                 )
                 if cursor.lastrowid:
                     job_ids.append(int(cursor.lastrowid))
@@ -1012,7 +1056,7 @@ class MarketDataStore:
             return [dict(row) for row in rows]
 
     def update_collection_job(self, job_id: int, now: Any, **fields: Any) -> None:
-        allowed = {"downloaded_bars", "next_start_position", "status", "attempts", "last_error"}
+        allowed = {"downloaded_bars", "next_start_position", "next_start_time", "status", "attempts", "last_error", "last_attempt_at", "last_successful_at", "pagination_method"}
         values = {key: value for key, value in fields.items() if key in allowed}
         if not values:
             return
@@ -1031,16 +1075,51 @@ class MarketDataStore:
                 (job_id, now.isoformat(), event_type, message, json.dumps(payload or {}, default=str)),
             )
 
-    def load_historical_candles(self, symbol: str, timeframe: str, limit: int = 10000) -> list[Any]:
+    def save_collection_batch_diagnostic(self, payload: dict[str, Any]) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO collection_batch_diagnostics (job_id, created_at, symbol, timeframe, request_type, start_position, requested_from, requested_to, batch_size, returned_count, accepted_count, first_raw_time, last_raw_time, first_effective_time, last_effective_time, duplicate_count, overlap_count, gap_count, out_of_order_count, forming_count, quality_status, retry_count, duration_ms, mt5_error_code, mt5_error_description, result, message, provenance_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    payload.get("job_id"), payload["created_at"], payload["symbol"], payload["timeframe"], payload["request_type"],
+                    payload.get("start_position"), payload.get("requested_from"), payload.get("requested_to"), payload["batch_size"],
+                    payload.get("returned_count", 0), payload.get("accepted_count", 0), payload.get("first_raw_time"), payload.get("last_raw_time"),
+                    payload.get("first_effective_time"), payload.get("last_effective_time"), payload.get("duplicate_count", 0), payload.get("overlap_count", 0),
+                    payload.get("gap_count", 0), payload.get("out_of_order_count", 0), payload.get("forming_count", 0), payload.get("quality_status", "UNKNOWN"),
+                    payload.get("retry_count", 0), payload.get("duration_ms"), payload.get("mt5_error_code"), payload.get("mt5_error_description"),
+                    payload.get("result", "UNKNOWN"), payload.get("message", ""), json.dumps(payload.get("provenance", {}), default=str),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def recent_collection_batch_diagnostics(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT * FROM collection_batch_diagnostics ORDER BY batch_id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def historical_bounds(self, symbol: str, timeframe: str) -> dict[str, str | None]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT MIN(raw_time), MAX(raw_time), MIN(effective_time), MAX(effective_time) FROM historical_candles WHERE symbol=? AND timeframe=?",
+                (symbol.upper(), timeframe.upper()),
+            ).fetchone()
+            return {"earliest_raw": row[0], "latest_raw": row[1], "earliest_effective": row[2], "latest_effective": row[3]}
+
+    def load_historical_candles(self, symbol: str, timeframe: str, limit: int = 10000, include_forming: bool = False) -> list[Any]:
         from datetime import datetime
         from .models import Candle
 
         with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT raw_time, open, high, low, close, tick_volume, spread, real_volume "
-                "FROM historical_candles WHERE symbol=? AND timeframe=? ORDER BY effective_time LIMIT ?",
-                (symbol.upper(), timeframe.upper(), limit),
-            ).fetchall()
+            query = "SELECT raw_time, open, high, low, close, tick_volume, spread, real_volume FROM historical_candles WHERE symbol=? AND timeframe=?"
+            params: list[Any] = [symbol.upper(), timeframe.upper()]
+            if not include_forming:
+                query += " AND quality_status != 'FORMING'"
+            query += " ORDER BY effective_time LIMIT ?"
+            params.append(limit)
+            rows = connection.execute(query, tuple(params)).fetchall()
         return [
             Candle(symbol.upper(), timeframe.upper(), datetime.fromisoformat(row[0]), row[1], row[2], row[3], row[4], row[5], row[6], row[7])
             for row in rows

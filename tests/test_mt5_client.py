@@ -83,6 +83,22 @@ def test_numpy_structured_candles_are_parsed(fake_mt5):
     assert candles[0].spread == 2
 
 
+def test_time_range_candles_preserve_raw_epoch_label(fake_mt5):
+    fake_mt5.copy_rates_range = lambda symbol, timeframe, date_from, date_to: [{
+        "time": int(datetime(2026, 1, 1, 2, tzinfo=timezone.utc).timestamp()),
+        "open": 1.1, "high": 1.101, "low": 1.099, "close": 1.1005,
+        "tick_volume": 42, "spread": 2, "real_volume": 0,
+    }]
+    client = ReadOnlyMt5Client(api=fake_mt5)
+    client.connect()
+
+    candles = client.get_candles_range(
+        "EURUSD", "H1", datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 2, tzinfo=timezone.utc)
+    )
+
+    assert candles[0].time == datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
+
+
 def test_invalid_numpy_candle_value_is_rejected(fake_mt5):
     fake_mt5.copy_rates_from_pos = lambda symbol, timeframe, start, count: np.array(
         [(1798761600, np.nan, 1.101, 1.099, 1.1005, 42, 2, 0)],
