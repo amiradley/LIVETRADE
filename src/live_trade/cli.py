@@ -11,6 +11,7 @@ from .dashboard import serve_dashboard
 from .finance import FinancialDataService
 from .historical import CollectionScheduler, HistoricalDataEngine
 from .instrument_intelligence import priority_for
+from .research_intelligence import ResearchService
 from .logging_config import configure_logging
 from .mt5_client import ReadOnlyMt5Client
 from .timestamping import BrokerTimeConfig
@@ -83,6 +84,12 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("collection-pause", help="Pause queued collection jobs")
     subparsers.add_parser("collection-resume", help="Resume paused collection jobs")
     subparsers.add_parser("collection-cancel", help="Cancel queued collection jobs")
+    research = subparsers.add_parser("research-run", help="Run a bounded, read-only research workflow")
+    research.add_argument("--symbol", required=True)
+    research.add_argument("--timeframe", required=True, choices=ReadOnlyMt5Client.TIMEFRAMES)
+    research.add_argument("--limit", type=int, default=4)
+    research.add_argument("--rerun", action="store_true", help="Repeat completed experiments for audit comparison")
+    subparsers.add_parser("research-status", help="Show persisted research and validation status")
     return parser
 
 
@@ -105,6 +112,13 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
         else:
             getattr(scheduler, args.command.removeprefix("collection-"))()
             _print_json(scheduler.status())
+        return 0
+    if args.command == "research-status":
+        store = MarketDataStore(settings.db_path)
+        _print_json({"summary": store.research_summary(), "experiments": store.research_rows("research_experiments"), "validations": store.research_rows("validation_runs")})
+        return 0
+    if args.command == "research-run":
+        _print_json(ResearchService(MarketDataStore(settings.db_path)).run(args.symbol, args.timeframe, args.limit, args.rerun))
         return 0
     logger = logging.getLogger(__name__)
     client = ReadOnlyMt5Client(mt5_path=settings.mt5_path, broker_time=settings.broker_time)

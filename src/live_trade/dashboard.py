@@ -20,6 +20,7 @@ from .historical import CollectionScheduler, HistoricalDataEngine
 from .intelligence import FinancialIntelligenceService, FinancialIntelligenceSnapshot
 from .mt5_client import ReadOnlyMt5Client
 from .research import ResearchWorker
+from .research_intelligence import ResearchService
 from .session import SessionError, SessionMode, SessionState, TradingSessionController
 from .storage import MarketDataStore
 from .storage_manager import StorageManager
@@ -201,6 +202,7 @@ class DashboardService:
         self.storage_manager = StorageManager(settings.base_dir)
         self.historical_engine = HistoricalDataEngine(self.client, self.store, settings.broker_time, settings.base_dir)
         self.collection_scheduler = CollectionScheduler(self.store)
+        self.research_service = ResearchService(self.store)
         self._storage_cache: dict[str, Any] | None = None
         self._storage_cache_at = 0.0
         self.lock = threading.RLock()
@@ -469,6 +471,23 @@ class DashboardService:
                 if owns_connection:
                     self.client.disconnect()
 
+    def research(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "summary": self.store.research_summary(),
+                "hypotheses": self.store.research_rows("research_hypotheses"),
+                "experiments": self.store.research_rows("research_experiments"),
+                "validations": self.store.research_rows("validation_runs"),
+                "learning": self.store.research_rows("learning_observations"),
+                "data_readiness": self.store.coverage_summary(),
+            }
+
+    def research_run(self) -> dict[str, Any]:
+        with self.lock:
+            symbol = self.settings.symbols[0] if self.settings.symbols else "EURUSD"
+            result = self.research_service.run(symbol, "M1", limit=4)
+            return {"result": result, **self.research()}
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "LIVE-TRADING-Dashboard/0.1"
@@ -523,6 +542,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send(self.service.storage())
             if path == "/api/historical":
                 return self._send(self.service.historical())
+            if path == "/api/research":
+                return self._send(self.service.research())
             return self._send({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             LOGGER.exception("Dashboard request failed")
@@ -550,6 +571,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/historical/cancel":
                 self.service.collection_scheduler.cancel()
                 return self._send(self.service.historical())
+            if path == "/api/research/start":
+                return self._send(self.service.research_run())
             return self._send({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except SessionError as exc:
             self._send({"error": str(exc), "session": _session_payload(self.service.controller.status, self.service.controller.component_health())}, HTTPStatus.CONFLICT)

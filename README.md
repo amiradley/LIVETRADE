@@ -52,6 +52,8 @@ python -m live_trade history-audit --symbol EURUSD --timeframe M1 --timeframe M5
 python -m live_trade collection-plan --symbol EURUSD --timeframe M1 --timeframe M5 --bars 500
 python -m live_trade collect --symbol EURUSD --timeframe M1 --timeframe M5 --bars 500 --max-batches 1
 python -m live_trade collection-status
+python -m live_trade research-run --symbol EURUSD --timeframe M1 --limit 4
+python -m live_trade research-status
 python -m live_trade dashboard --open-browser
 ```
 
@@ -85,6 +87,8 @@ Stage 1.6 adds read-only broker deal-history reconciliation, partial-close aggre
 Stage 1.6A adds end-to-end demo-shadow health reporting. START now starts the read-only scanner, closed-candle technical-analysis, and market-monitoring worker; STOP joins it before the final snapshot. Component cycle counts and thread liveness are exposed through `/api/status`, and MT5 failures transition the session to an explicit error/stale state.
 
 Stage 1.7 adds instrument intelligence, historical coverage audits, quality validation, a resumable historical-candle store, collection priorities, persisted collection jobs, and dashboard data-intelligence controls. The default collection commands are bounded and read-only. The scheduler is persistence-backed but intentionally not an operating-system service: collection runs only while explicitly started from the CLI or dashboard.
+
+The research intelligence layer provides reproducible hypothesis records, bounded OHLC backtests with explicit spread/slippage assumptions, train/out-of-sample separation, validation outcomes, evidence records, and persistent learning observations. It is deliberately conservative: small samples produce inconclusive results, rejected hypotheses remain stored, and no research status grants execution approval.
 
 ## Tests
 

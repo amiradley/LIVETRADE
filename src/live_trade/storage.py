@@ -286,6 +286,97 @@ CREATE TABLE IF NOT EXISTS collection_events (
     message TEXT NOT NULL,
     payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS research_hypotheses (
+    hypothesis_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    family TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    definition_json TEXT NOT NULL,
+    version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    falsification_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(name, version)
+);
+CREATE TABLE IF NOT EXISTS research_experiments (
+    experiment_id TEXT PRIMARY KEY,
+    hypothesis_id TEXT NOT NULL REFERENCES research_hypotheses(hypothesis_id),
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    data_start TEXT,
+    data_end TEXT,
+    config_json TEXT NOT NULL,
+    data_reference_json TEXT NOT NULL,
+    priority REAL NOT NULL,
+    status TEXT NOT NULL,
+    progress REAL NOT NULL DEFAULT 0,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(hypothesis_id, symbol, timeframe, config_json, data_reference_json)
+);
+CREATE INDEX IF NOT EXISTS idx_research_experiments_status_priority ON research_experiments(status, priority DESC);
+CREATE TABLE IF NOT EXISTS backtest_results (
+    result_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL REFERENCES research_experiments(experiment_id),
+    run_key TEXT NOT NULL UNIQUE,
+    metrics_json TEXT NOT NULL,
+    trades_json TEXT NOT NULL,
+    assumptions_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS validation_runs (
+    validation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL REFERENCES research_experiments(experiment_id),
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL,
+    metrics_json TEXT NOT NULL,
+    failure_reasons_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS strategy_versions (
+    strategy_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    hypothesis_id TEXT NOT NULL REFERENCES research_hypotheses(hypothesis_id),
+    parent_version TEXT,
+    status TEXT NOT NULL,
+    approval_status TEXT NOT NULL,
+    parameters_json TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(strategy_id, version)
+);
+CREATE TABLE IF NOT EXISTS learning_observations (
+    observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    observation TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    confidence_label TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_evidence (
+    evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT,
+    evidence_type TEXT NOT NULL,
+    statement TEXT NOT NULL,
+    source_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_priorities (
+    priority_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject TEXT NOT NULL,
+    priority REAL NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_reports (
+    report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_date TEXT NOT NULL,
+    report_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -876,3 +967,102 @@ class MarketDataStore:
                 "INSERT INTO collection_events (job_id, event_time, event_type, message, payload_json) VALUES (?, ?, ?, ?, ?)",
                 (job_id, now.isoformat(), event_type, message, json.dumps(payload or {}, default=str)),
             )
+
+    def load_historical_candles(self, symbol: str, timeframe: str, limit: int = 10000) -> list[Any]:
+        from datetime import datetime
+        from .models import Candle
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT raw_time, open, high, low, close, tick_volume, spread, real_volume "
+                "FROM historical_candles WHERE symbol=? AND timeframe=? ORDER BY effective_time LIMIT ?",
+                (symbol.upper(), timeframe.upper(), limit),
+            ).fetchall()
+        return [
+            Candle(symbol.upper(), timeframe.upper(), datetime.fromisoformat(row[0]), row[1], row[2], row[3], row[4], row[5], row[6], row[7])
+            for row in rows
+        ]
+
+    def research_save(self, table: str, payload: dict[str, Any]) -> None:
+        import json as _json
+
+        with self.connect() as connection:
+            if table == "hypothesis":
+                connection.execute(
+                    "INSERT OR IGNORE INTO research_hypotheses "
+                    "(hypothesis_id,name,family,rationale,definition_json,version,status,falsification_json,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)", tuple(payload[key] for key in ("hypothesis_id", "name", "family", "rationale", "definition_json", "version", "status", "falsification_json", "created_at"))
+                )
+            elif table == "experiment":
+                connection.execute(
+                    "INSERT OR IGNORE INTO research_experiments "
+                    "(experiment_id,hypothesis_id,symbol,timeframe,data_start,data_end,config_json,data_reference_json,priority,status,progress,failure_reason,created_at,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", tuple(payload.get(key) for key in ("experiment_id", "hypothesis_id", "symbol", "timeframe", "data_start", "data_end", "config_json", "data_reference_json", "priority", "status", "progress", "failure_reason", "created_at", "updated_at"))
+                )
+            elif table == "backtest":
+                connection.execute(
+                    "INSERT OR IGNORE INTO backtest_results (experiment_id,run_key,metrics_json,trades_json,assumptions_json,created_at) VALUES (?,?,?,?,?,?)",
+                    tuple(payload[key] for key in ("experiment_id", "run_key", "metrics_json", "trades_json", "assumptions_json", "created_at")),
+                )
+            elif table == "validation":
+                connection.execute(
+                    "INSERT INTO validation_runs (experiment_id,stage,status,metrics_json,failure_reasons_json,created_at) VALUES (?,?,?,?,?,?)",
+                    tuple(payload[key] for key in ("experiment_id", "stage", "status", "metrics_json", "failure_reasons_json", "created_at")),
+                )
+            elif table == "learning":
+                connection.execute(
+                    "INSERT INTO learning_observations (category,subject,observation,evidence_json,confidence_label,created_at) VALUES (?,?,?,?,?,?)",
+                    tuple(payload[key] for key in ("category", "subject", "observation", "evidence_json", "confidence_label", "created_at")),
+                )
+            elif table == "evidence":
+                connection.execute(
+                    "INSERT INTO research_evidence (experiment_id,evidence_type,statement,source_json,created_at) VALUES (?,?,?,?,?)",
+                    tuple(payload.get(key) for key in ("experiment_id", "evidence_type", "statement", "source_json", "created_at")),
+                )
+            elif table == "priority":
+                connection.execute(
+                    "INSERT INTO research_priorities (subject,priority,reason,status,created_at) VALUES (?,?,?,?,?)",
+                    tuple(payload[key] for key in ("subject", "priority", "reason", "status", "created_at")),
+                )
+            elif table == "report":
+                connection.execute(
+                    "INSERT INTO research_reports (report_date,report_json,created_at) VALUES (?,?,?)",
+                    tuple(payload[key] for key in ("report_date", "report_json", "created_at")),
+                )
+            else:
+                raise ValueError(f"Unknown research table: {table}")
+
+    def research_update_experiment(self, experiment_id: str, status: str, progress: float, failure_reason: str | None = None) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE research_experiments SET status=?, progress=?, failure_reason=?, updated_at=datetime('now') WHERE experiment_id=?",
+                (status, progress, failure_reason, experiment_id),
+            )
+
+    def research_rows(self, table: str, limit: int = 100) -> list[dict[str, Any]]:
+        allowed = {"research_hypotheses", "research_experiments", "backtest_results", "validation_runs", "learning_observations", "strategy_versions", "research_evidence", "research_priorities"}
+        if table not in allowed:
+            raise ValueError(f"Unknown research table: {table}")
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT ?", (limit,)).fetchall()
+            return [dict(row) for row in rows]
+
+    def research_summary(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            def count(table: str, where: str = "", params: tuple[Any, ...] = ()) -> int:
+                return int(connection.execute(f"SELECT COUNT(*) FROM {table} {where}", params).fetchone()[0])
+            return {
+                "hypotheses": count("research_hypotheses"),
+                "experiments": count("research_experiments"),
+                "completed": count("research_experiments", "WHERE status='COMPLETE'"),
+                "running": count("research_experiments", "WHERE status='RUNNING'"),
+                "queued": count("research_experiments", "WHERE status='QUEUED'"),
+                "failed": count("research_experiments", "WHERE status='FAILED'"),
+                "validation_runs": count("validation_runs"),
+                "learning_observations": count("learning_observations"),
+                "evidence_records": count("research_evidence"),
+                "by_validation_status": {
+                    str(row[0]): int(row[1]) for row in connection.execute("SELECT status, COUNT(*) FROM validation_runs GROUP BY status")
+                },
+            }

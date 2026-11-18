@@ -74,6 +74,16 @@ The quality engine validates finite positive OHLC values, candle relationships, 
 
 The collection scheduler is deliberately persistence-backed rather than an OS-level daemon. `collection-status` reports `active_scheduler=false` unless an explicit CLI/dashboard collection is running. The dashboard exposes `/api/historical`, audit, plan, bounded-start, pause, resume, and cancel controls; these endpoints have no order or account-mutation capability. Storage protection is checked before each batch, and collection pauses at the 90% disk threshold without deleting anything.
 
+## Stages 1.9–2.1 research intelligence
+
+`research_intelligence.py` is the unified research layer. `generate_hypotheses` creates stable, reproducible definitions for momentum, mean-reversion, breakout, and volatility families. Each hypothesis stores rationale, variables, signal timing, version, and falsification criteria. Experiments reference the existing `historical_candles` table rather than duplicating OHLC data.
+
+`BacktestEngine` is an OHLC-only research simulator. Signals are computed from closed candles and entries occur at the next candle open. Spread, slippage, commission, risk sizing, stop/target assumptions, holding time, trade outcomes, drawdown, expectancy, profit factor, win rate, trade-level Sharpe/Sortino, and an expectancy confidence interval are recorded. Bid/ask history limitations are explicit in the assumptions and are never presented as observed execution data.
+
+`ResearchService` persists the hypothesis → experiment → backtest → validation → learning chain. Validation separates a training segment from an out-of-sample segment and fails candidates for insufficient data, negative expectancy, unmeasurable/low profit factor, or excessive drawdown. Results are classified as `REJECTED` or `INCONCLUSIVE` unless the bounded gates are actually satisfied; no current workflow creates a `VALIDATED_RESEARCH` or execution-approved strategy. Duplicate experiment configurations are prevented by stable IDs and database uniqueness constraints.
+
+Research tables preserve hypotheses, experiments, backtest results, validation runs, strategy-version records, evidence, priorities, learning observations, and reports. The dashboard Research Intelligence page and `/api/research` endpoint expose counts, validation statuses, data readiness, experiments, and learning records. The bounded research control has no MT5 order API and cannot modify approved strategies. The current pilot dataset is not statistically sufficient for a profitability claim.
+
 ## Phase 2.2 technical-analysis foundation
 
 `TechnicalAnalyzer` operates only on validated numerical OHLC candles. It calculates SMA 20/50, EMA 9/20/50, RSI 14, MACD 12/26/9, ATR 14, ATR percentage, candle range, and recent volatility change. It detects only rule-based engulfing, hammer, shooting-star, doji, and strong-candle formations with numerical evidence. It also reports measurable higher/lower structure, support/resistance, breakouts, false breakouts, multi-timeframe agreement, and a provisional technical score with factor contributions.
