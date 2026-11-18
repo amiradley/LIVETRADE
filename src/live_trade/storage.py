@@ -365,7 +365,11 @@ CREATE TABLE IF NOT EXISTS collection_sessions (
     forming_excluded INTEGER NOT NULL DEFAULT 0,
     mt5_failure_count INTEGER NOT NULL DEFAULT 0,
     memory_peak_mb REAL,
-    cpu_sample_percent REAL
+    cpu_sample_percent REAL,
+    resource_start_json TEXT NOT NULL DEFAULT '{}',
+    resource_end_json TEXT NOT NULL DEFAULT '{}',
+    resource_peak_json TEXT NOT NULL DEFAULT '{}',
+    resource_protection_events INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_collection_sessions_started ON collection_sessions(started_at DESC);
 CREATE TABLE IF NOT EXISTS research_hypotheses (
@@ -516,6 +520,15 @@ class MarketDataStore:
         }.items():
             if name not in job_columns:
                 connection.execute(f"ALTER TABLE collection_jobs ADD COLUMN {name} {definition}")
+        session_columns = {row[1] for row in connection.execute("PRAGMA table_info(collection_sessions)")}
+        for name, definition in {
+            "resource_start_json": "TEXT NOT NULL DEFAULT '{}'",
+            "resource_end_json": "TEXT NOT NULL DEFAULT '{}'",
+            "resource_peak_json": "TEXT NOT NULL DEFAULT '{}'",
+            "resource_protection_events": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if name not in session_columns:
+                connection.execute(f"ALTER TABLE collection_sessions ADD COLUMN {name} {definition}")
         batch_columns = {row[1] for row in connection.execute("PRAGMA table_info(collection_batch_diagnostics)")}
         if "session_id" not in batch_columns:
             connection.execute("ALTER TABLE collection_batch_diagnostics ADD COLUMN session_id TEXT")
@@ -1133,11 +1146,11 @@ class MarketDataStore:
     def start_collection_session(self, payload: dict[str, Any]) -> None:
         with self.connect() as connection:
             connection.execute(
-                "INSERT INTO collection_sessions (session_id, started_at, status, symbols_json, timeframes_json, max_batches, max_candles, max_duration_seconds, max_storage_growth_bytes, initial_candle_count, initial_storage_bytes) VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?)",
-                (payload["session_id"], payload["started_at"], json.dumps(payload.get("symbols", [])), json.dumps(payload.get("timeframes", [])), payload["max_batches"], payload["max_candles"], payload["max_duration_seconds"], payload["max_storage_growth_bytes"], payload.get("initial_candle_count", 0), payload.get("initial_storage_bytes", 0)),
+                "INSERT INTO collection_sessions (session_id, started_at, status, symbols_json, timeframes_json, max_batches, max_candles, max_duration_seconds, max_storage_growth_bytes, initial_candle_count, initial_storage_bytes, resource_start_json) VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (payload["session_id"], payload["started_at"], json.dumps(payload.get("symbols", [])), json.dumps(payload.get("timeframes", [])), payload["max_batches"], payload["max_candles"], payload["max_duration_seconds"], payload["max_storage_growth_bytes"], payload.get("initial_candle_count", 0), payload.get("initial_storage_bytes", 0), json.dumps(payload.get("resource_start", {}), default=str)),
             )
 
-    def finish_collection_session(self, session_id: str, ended_at: str, status: str, stop_reason: str, final_candle_count: int, final_storage_bytes: int, memory_peak_mb: float | None = None, cpu_sample_percent: float | None = None) -> dict[str, Any]:
+    def finish_collection_session(self, session_id: str, ended_at: str, status: str, stop_reason: str, final_candle_count: int, final_storage_bytes: int, memory_peak_mb: float | None = None, cpu_sample_percent: float | None = None, resource_end: dict[str, Any] | None = None, resource_peak: dict[str, Any] | None = None, resource_protection_events: int = 0) -> dict[str, Any]:
         with self.connect() as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute("SELECT started_at FROM collection_sessions WHERE session_id=?", (session_id,)).fetchone()
@@ -1153,6 +1166,7 @@ class MarketDataStore:
                 "duplicate_count": int(diagnostics[6] or 0), "overlap_count": int(diagnostics[7] or 0), "out_of_order_count": int(diagnostics[8] or 0),
                 "gap_count": int(diagnostics[9] or 0), "forming_excluded": int(diagnostics[10] or 0), "mt5_failure_count": int(diagnostics[11] or 0),
                 "memory_peak_mb": memory_peak_mb, "cpu_sample_percent": cpu_sample_percent,
+                "resource_end_json": json.dumps(resource_end or {}, default=str), "resource_peak_json": json.dumps(resource_peak or {}, default=str), "resource_protection_events": resource_protection_events,
             }
             assignments = ", ".join(f"{key}=?" for key in values)
             connection.execute(f"UPDATE collection_sessions SET {assignments} WHERE session_id=?", (*values.values(), session_id))

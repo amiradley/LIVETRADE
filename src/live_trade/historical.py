@@ -11,6 +11,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from .instrument_intelligence import classify_instrument, priority_for
 from .models import Candle
 from .mt5_client import Mt5Error
+from .resource_monitor import ResourceMonitor, ResourceSnapshot
 from .storage import MarketDataStore
 from .storage_manager import StorageManager
 from .timestamping import BrokerTimeConfig, TimestampConfigurationError
@@ -228,7 +229,10 @@ class HistoricalDataEngine:
         self.store = store
         self.broker_time = broker_time
         self.storage_manager = StorageManager((project_root or store.path.parent).resolve())
+        self.resource_monitor = ResourceMonitor((project_root or store.path.parent).resolve(), store.path)
         self._classifications: dict[str, dict[str, Any]] = {}
+        self._session_resources: list[ResourceSnapshot] = []
+        self._session_resource_protection_events = 0
 
     def classify(self, symbols: Sequence[str] | None = None) -> dict[str, Any]:
         selected = {item.upper() for item in symbols} if symbols else None
@@ -475,6 +479,16 @@ class HistoricalDataEngine:
                     stop_reason = "MAX_BATCHES"
                 continue
             storage = self.storage_manager.scan()
+            resource = self.resource_monitor.capture()
+            if session_id:
+                self._session_resources.append(resource)
+            if resource.protection_state in {"PROTECTION", "CRITICAL"}:
+                self.store.update_collection_job(job["job_id"], now, status="PAUSED", last_error=f"Resource protection: {resource.protection_state}")
+                self.store.collection_event(job["job_id"], "PAUSED_RESOURCE", "Collection paused at a resource protection threshold", now, resource.to_dict())
+                paused = True
+                stop_reason = f"RESOURCE_{resource.protection_state}"
+                self._session_resource_protection_events += 1
+                break
             if storage.disk_used_percent >= 90:
                 self.store.update_collection_job(job["job_id"], now, status="PAUSED", last_error="Storage protection threshold reached")
                 self.store.collection_event(job["job_id"], "PAUSED_STORAGE", "Collection paused at the 90% disk threshold", now, storage.to_dict())
@@ -586,6 +600,9 @@ class HistoricalDataEngine:
     ) -> dict[str, Any]:
         session_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc)
+        self._session_resources = [self.resource_monitor.capture()]
+        self._session_resource_protection_events = 0
+        resource_start = self._session_resources[0]
         initial_storage = self.storage_manager.scan().sqlite_size_bytes
         initial_candles = self.store.historical_summary()["candles"]
         symbols = sorted({item.symbol for item in plan})
@@ -601,6 +618,7 @@ class HistoricalDataEngine:
             "max_storage_growth_bytes": max_storage_growth_bytes,
             "initial_candle_count": initial_candles,
             "initial_storage_bytes": initial_storage,
+            "resource_start": resource_start.to_dict(),
         })
         try:
             result = self.collect(
@@ -620,8 +638,11 @@ class HistoricalDataEngine:
             status = "FAILED"
             stop_reason = str(exc)
         finally:
+            resource_end = self.resource_monitor.capture()
+            self._session_resources.append(resource_end)
             final_storage = self.storage_manager.scan().sqlite_size_bytes
-            session = self.store.finish_collection_session(session_id, datetime.now(timezone.utc).isoformat(), status, stop_reason, self.store.historical_summary()["candles"], final_storage)
+            peak = max(self._session_resources, key=lambda item: (item.ram_used_percent or 0.0, item.disk_used_percent or 0.0))
+            session = self.store.finish_collection_session(session_id, datetime.now(timezone.utc).isoformat(), status, stop_reason, self.store.historical_summary()["candles"], final_storage, peak.process_memory_mb, peak.cpu_percent, resource_end.to_dict(), peak.to_dict(), self._session_resource_protection_events)
         result["session"] = session
         return result
 

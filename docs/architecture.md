@@ -96,6 +96,8 @@ Collection sessions are persisted independently from collection jobs. A session 
 
 The CLI and dashboard use conservative H1/M15 session defaults. Session boundaries are application-level only; no Windows scheduler or continuous restart loop is installed. A successful session means only that its bounded data requests passed the current structural gates. It does not promote a dataset to research-ready status or validate a strategy. Tier 2/Tier 3 and broad M1 collection remain deferred until repeated Tier 1 sessions provide sufficient coverage and reliability evidence.
 
+Stage 1.8C attaches a `ResourceMonitor` to collection sessions. It samples system RAM through `GlobalMemoryStatusEx`, disk usage, SQLite size, and safe CPU/process telemetry where available. Thresholds are explicit: RAM warning/protection/critical at 75/85/90 percent and disk warning/protection/critical at 70/85/90 percent. A protection or critical sample pauses the affected session before another MT5 request. Unavailable fields remain null with a source explanation. Resource snapshots and protection events are persisted with the session so later expansion decisions have operational evidence.
+
 ## Stages 1.9–2.1 research intelligence
 
 `research_intelligence.py` is the unified research layer. `generate_hypotheses` creates stable, reproducible definitions for momentum, mean-reversion, breakout, and volatility families. Each hypothesis stores rationale, variables, signal timing, version, and falsification criteria. Experiments reference the existing `historical_candles` table rather than duplicating OHLC data.

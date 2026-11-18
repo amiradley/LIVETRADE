@@ -94,6 +94,8 @@ Stage 1.8A replaces moving positional pagination after the newest page with time
 
 Stage 1.8B adds bounded collection sessions for progressive Tier 1 expansion. A session records its scope, limits, start/end state, request and quality counters, storage growth, and stop reason. CLI collection sessions default to H1/M15, a finite batch budget, a candle cap, a duration cap, and a storage-growth cap; the session processes only the jobs in its explicit plan and does not drain unrelated queued work. Session history is available through `collection-status` and `collection-sessions`, while the dashboard shows recent session outcomes and batch diagnostics. These controls support repeated resumable sessions without implying that increased candle count is research readiness.
 
+Stage 1.8C adds Windows-native, read-only resource snapshots to bounded sessions. System RAM and disk usage are sampled with explicit warning/protection/critical states; SQLite growth remains independently capped. Process RAM and CPU are reported as unavailable when a safe native measurement is not available, never as zero. Protection states pause new collection requests without deleting data. The four pilot instruments and H1/M15 scope remain the only expansion scope.
+
 The research intelligence layer provides reproducible hypothesis records, bounded OHLC backtests with explicit spread/slippage assumptions, train/out-of-sample separation, validation outcomes, evidence records, and persistent learning observations. It is deliberately conservative: small samples produce inconclusive results, rejected hypotheses remain stored, and no research status grants execution approval.
 
 ## Tests
