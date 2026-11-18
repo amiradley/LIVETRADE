@@ -88,6 +88,8 @@ Stage 1.6A adds end-to-end demo-shadow health reporting. START now starts the re
 
 Stage 1.7 adds instrument intelligence, historical coverage audits, quality validation, a resumable historical-candle store, collection priorities, persisted collection jobs, and dashboard data-intelligence controls. The default collection commands are bounded and read-only. The scheduler is persistence-backed but intentionally not an operating-system service: collection runs only while explicitly started from the CLI or dashboard.
 
+Stage 1.8 adds deterministic instrument-priority tiers, configurable historical targets, bounded paged coverage audits, and explicit research-readiness state without changing the read-only boundary. `INITIAL`, `INTERMEDIATE`, and `EXTENDED` targets are defined per supported timeframe. Coverage records retain local and broker counts, target level, source status, dataset version, and provenance, so broker availability cannot be mistaken for local research readiness. The collector pauses at the storage protection threshold, resumes from persisted positions, and never deletes or silently repairs flagged data. M1 expansion is intentionally deferred until the higher-timeframe pilot and quality findings are reviewed.
+
 The research intelligence layer provides reproducible hypothesis records, bounded OHLC backtests with explicit spread/slippage assumptions, train/out-of-sample separation, validation outcomes, evidence records, and persistent learning observations. It is deliberately conservative: small samples produce inconclusive results, rejected hypotheses remain stored, and no research status grants execution approval.
 
 ## Tests

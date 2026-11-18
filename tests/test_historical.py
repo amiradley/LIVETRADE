@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from threading import RLock
 
-from live_trade.historical import CollectionPlanItem, HistoricalDataEngine, validate_candles
+from live_trade.historical import CollectionPlanItem, HistoricalDataEngine, target_for, validate_candles
 from live_trade.instrument_intelligence import classify_instrument, instrument_category
 from live_trade.models import Candle
 from live_trade.mt5_client import ReadOnlyMt5Client
@@ -80,12 +80,32 @@ def test_engine_audit_and_collection_are_persisted_and_resumable(tmp_path, fake_
     second = engine.collect(plan, max_batches=1, batch_size=1, rate_limit_seconds=0)
 
     assert summary["total"] == 1
+    assert summary["by_priority_tier"]["TIER1"] == 1
     assert reports[0].candle_count == 1
     assert result["batches"] == 1
     assert second["historical"]["candles"] == 2
     assert store.historical_summary()["candles"] == 2
     assert store.coverage_summary()["by_timeframe"]["M1"]["audited"] == 1
     assert store.collection_jobs()[0]["downloaded_bars"] == 2
+
+
+def test_full_depth_audit_pages_older_mt5_batches(tmp_path, fake_mt5):
+    store = MarketDataStore(tmp_path / "market.sqlite3")
+    client = ReadOnlyMt5Client(api=fake_mt5)
+    client.connect()
+    fake_mt5.copy_rates_from_pos = lambda symbol, timeframe, start, count: [{
+        "time": int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()) - start * 60,
+        "open": 1.1, "high": 1.101, "low": 1.099, "close": 1.1005, "tick_volume": 42, "spread": 2, "real_volume": 0,
+    }] if start < 3 else []
+    engine = HistoricalDataEngine(client, store, BrokerTimeConfig.metaquotes_demo_default(), tmp_path)
+
+    reports = engine.audit(("EURUSD",), ("M1",), bars=1, full_depth=True, max_batches=5)
+
+    assert reports[0].candle_count == 3
+    with store.connect() as connection:
+        row = connection.execute("SELECT broker_candle_count, source_status, research_readiness FROM historical_coverage").fetchone()
+    assert tuple(row) == (3, "AVAILABLE", "NOT_COLLECTED")
+    assert target_for("H1", "INITIAL") == 1000
 
 
 def test_collection_scheduler_persists_pause_resume_cancel(tmp_path):

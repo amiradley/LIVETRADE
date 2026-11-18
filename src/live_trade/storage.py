@@ -219,6 +219,9 @@ CREATE TABLE IF NOT EXISTS instrument_catalog (
     trading_status TEXT NOT NULL,
     suitability TEXT NOT NULL,
     suitability_reasons_json TEXT NOT NULL,
+    priority_tier TEXT NOT NULL DEFAULT 'TIER3',
+    priority_score REAL NOT NULL DEFAULT 0,
+    priority_reason TEXT NOT NULL DEFAULT '',
     payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_instrument_catalog_suitability ON instrument_catalog(suitability);
@@ -238,8 +241,16 @@ CREATE TABLE IF NOT EXISTS historical_coverage (
     latest_candle_complete INTEGER NOT NULL,
     data_quality TEXT NOT NULL,
     readiness TEXT NOT NULL,
+    research_readiness TEXT NOT NULL DEFAULT 'NOT_COLLECTED',
     error TEXT,
     metadata_json TEXT NOT NULL,
+    local_candle_count INTEGER NOT NULL DEFAULT 0,
+    broker_candle_count INTEGER,
+    target_count INTEGER NOT NULL DEFAULT 0,
+    target_level TEXT NOT NULL DEFAULT 'INITIAL',
+    source_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+    dataset_version TEXT NOT NULL DEFAULT 'v1',
+    provenance_json TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (symbol, timeframe)
 );
 CREATE INDEX IF NOT EXISTS idx_historical_coverage_readiness ON historical_coverage(readiness);
@@ -268,6 +279,7 @@ CREATE TABLE IF NOT EXISTS collection_jobs (
     tier TEXT NOT NULL,
     priority REAL NOT NULL,
     target_bars INTEGER NOT NULL,
+    target_level TEXT NOT NULL DEFAULT 'INITIAL',
     downloaded_bars INTEGER NOT NULL DEFAULT 0,
     next_start_position INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
@@ -402,6 +414,30 @@ class MarketDataStore:
             connection.execute("ALTER TABLE scan_results ADD COLUMN timestamp_configured INTEGER NOT NULL DEFAULT 0")
         if "timestamp_config_source" not in existing_columns:
             connection.execute("ALTER TABLE scan_results ADD COLUMN timestamp_config_source TEXT NOT NULL DEFAULT ''")
+        catalog_columns = {row[1] for row in connection.execute("PRAGMA table_info(instrument_catalog)")}
+        for name, definition in {
+            "priority_tier": "TEXT NOT NULL DEFAULT 'TIER3'",
+            "priority_score": "REAL NOT NULL DEFAULT 0",
+            "priority_reason": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if name not in catalog_columns:
+                connection.execute(f"ALTER TABLE instrument_catalog ADD COLUMN {name} {definition}")
+        coverage_columns = {row[1] for row in connection.execute("PRAGMA table_info(historical_coverage)")}
+        for name, definition in {
+            "local_candle_count": "INTEGER NOT NULL DEFAULT 0",
+            "broker_candle_count": "INTEGER",
+            "target_count": "INTEGER NOT NULL DEFAULT 0",
+            "target_level": "TEXT NOT NULL DEFAULT 'INITIAL'",
+            "source_status": "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+            "dataset_version": "TEXT NOT NULL DEFAULT 'v1'",
+            "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
+            "research_readiness": "TEXT NOT NULL DEFAULT 'NOT_COLLECTED'",
+        }.items():
+            if name not in coverage_columns:
+                connection.execute(f"ALTER TABLE historical_coverage ADD COLUMN {name} {definition}")
+        job_columns = {row[1] for row in connection.execute("PRAGMA table_info(collection_jobs)")}
+        if "target_level" not in job_columns:
+            connection.execute("ALTER TABLE collection_jobs ADD COLUMN target_level TEXT NOT NULL DEFAULT 'INITIAL'")
         technical_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(technical_analysis)")
         }
@@ -803,8 +839,9 @@ class MarketDataStore:
                     "symbol, refreshed_at, category, description, path, exchange, currency_base, "
                     "currency_profit, currency_margin, contract_size, tick_size, tick_value, "
                     "volume_min, volume_max, volume_step, trade_mode, visible, bid, ask, "
-                    "spread_points, market_state, trading_status, suitability, suitability_reasons_json, payload_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "spread_points, market_state, trading_status, suitability, suitability_reasons_json, "
+                    "priority_tier, priority_score, priority_reason, payload_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(symbol) DO UPDATE SET refreshed_at=excluded.refreshed_at, "
                     "category=excluded.category, description=excluded.description, path=excluded.path, "
                     "exchange=excluded.exchange, currency_base=excluded.currency_base, "
@@ -814,7 +851,8 @@ class MarketDataStore:
                     "trade_mode=excluded.trade_mode, visible=excluded.visible, bid=excluded.bid, ask=excluded.ask, "
                     "spread_points=excluded.spread_points, market_state=excluded.market_state, "
                     "trading_status=excluded.trading_status, suitability=excluded.suitability, "
-                    "suitability_reasons_json=excluded.suitability_reasons_json, payload_json=excluded.payload_json",
+                    "suitability_reasons_json=excluded.suitability_reasons_json, priority_tier=excluded.priority_tier, "
+                    "priority_score=excluded.priority_score, priority_reason=excluded.priority_reason, payload_json=excluded.payload_json",
                     (
                         record["symbol"], record["refreshed_at"], record["category"], record.get("description", ""),
                         record.get("path", ""), record.get("exchange", ""), record.get("currency_base"),
@@ -824,7 +862,9 @@ class MarketDataStore:
                         int(bool(record.get("visible"))) if record.get("visible") is not None else None,
                         record.get("bid"), record.get("ask"), record.get("spread_points"),
                         record["market_state"], record["trading_status"], record["suitability"],
-                        json.dumps(record.get("suitability_reasons", [])), json.dumps(record.get("raw", {}), default=str),
+                        json.dumps(record.get("suitability_reasons", [])), record.get("priority_tier", "TIER3"),
+                        record.get("priority_score", 0.0), record.get("priority_reason", ""),
+                        json.dumps(record.get("raw", {}), default=str),
                     ),
                 )
                 saved += 1
@@ -842,6 +882,10 @@ class MarketDataStore:
                 "total": int(connection.execute("SELECT COUNT(*) FROM instrument_catalog").fetchone()[0]),
                 "by_suitability": {str(row[0]): int(row[1]) for row in rows},
                 "by_category": {str(row[0]): int(row[1]) for row in categories},
+                "by_priority_tier": {
+                    str(row[0]): int(row[1])
+                    for row in connection.execute("SELECT priority_tier, COUNT(*) FROM instrument_catalog GROUP BY priority_tier")
+                },
                 "refreshed_at": connection.execute("SELECT MAX(refreshed_at) FROM instrument_catalog").fetchone()[0],
             }
 
@@ -850,20 +894,27 @@ class MarketDataStore:
             connection.execute(
                 "INSERT INTO historical_coverage (symbol, timeframe, audited_at, earliest_candle_time, "
                 "latest_candle_time, candle_count, complete_candle_count, gap_count, duplicate_count, "
-                "invalid_count, timestamp_integrity, latest_candle_complete, data_quality, readiness, error, metadata_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "invalid_count, timestamp_integrity, latest_candle_complete, data_quality, readiness, research_readiness, error, metadata_json, "
+                "local_candle_count, broker_candle_count, target_count, target_level, source_status, dataset_version, provenance_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(symbol, timeframe) DO UPDATE SET audited_at=excluded.audited_at, "
                 "earliest_candle_time=excluded.earliest_candle_time, latest_candle_time=excluded.latest_candle_time, "
                 "candle_count=excluded.candle_count, complete_candle_count=excluded.complete_candle_count, "
                 "gap_count=excluded.gap_count, duplicate_count=excluded.duplicate_count, invalid_count=excluded.invalid_count, "
                 "timestamp_integrity=excluded.timestamp_integrity, latest_candle_complete=excluded.latest_candle_complete, "
-                "data_quality=excluded.data_quality, readiness=excluded.readiness, error=excluded.error, metadata_json=excluded.metadata_json",
+                "data_quality=excluded.data_quality, readiness=excluded.readiness, research_readiness=excluded.research_readiness, error=excluded.error, metadata_json=excluded.metadata_json, "
+                "local_candle_count=excluded.local_candle_count, broker_candle_count=excluded.broker_candle_count, "
+                "target_count=excluded.target_count, target_level=excluded.target_level, source_status=excluded.source_status, "
+                "dataset_version=excluded.dataset_version, provenance_json=excluded.provenance_json",
                 (
                     report["symbol"], report["timeframe"], report["audited_at"], report.get("earliest_candle_time"),
                     report.get("latest_candle_time"), report["candle_count"], report["complete_candle_count"],
                     report["gap_count"], report["duplicate_count"], report["invalid_count"], report["timestamp_integrity"],
-                    int(report["latest_candle_complete"]), report["data_quality"], report["readiness"],
+                    int(report["latest_candle_complete"]), report["data_quality"], report["readiness"], report.get("research_readiness", "NOT_COLLECTED"),
                     report.get("error"), json.dumps(report.get("metadata", {}), default=str),
+                    report.get("local_candle_count", 0), report.get("broker_candle_count"), report.get("target_count", 0),
+                    report.get("target_level", "INITIAL"), report.get("source_status", "UNKNOWN"),
+                    report.get("dataset_version", "v1"), json.dumps(report.get("provenance", {}), default=str),
                 ),
             )
 
@@ -876,12 +927,16 @@ class MarketDataStore:
             readiness = connection.execute(
                 "SELECT readiness, COUNT(*) FROM historical_coverage GROUP BY readiness"
             ).fetchall()
+            research_readiness = connection.execute(
+                "SELECT research_readiness, COUNT(*) FROM historical_coverage GROUP BY research_readiness"
+            ).fetchall()
             return {
                 "by_timeframe": {
                     str(row[0]): {"audited": int(row[1]), "candles": int(row[2] or 0), "complete": int(row[3] or 0)}
                     for row in rows
                 },
                 "by_readiness": {str(row[0]): int(row[1]) for row in readiness},
+                "by_research_readiness": {str(row[0]): int(row[1]) for row in research_readiness},
             }
 
     def save_historical_candles(self, records: Any) -> int:
@@ -914,15 +969,23 @@ class MarketDataStore:
                 },
             }
 
+    def historical_summary_for(self, symbol: str, timeframe: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*), MIN(effective_time), MAX(effective_time) FROM historical_candles WHERE symbol=? AND timeframe=?",
+                (symbol.upper(), timeframe.upper()),
+            ).fetchone()
+            return {"candles": int(row[0]), "earliest": row[1], "latest": row[2]}
+
     def create_collection_jobs(self, items: Any, now: Any) -> list[int]:
         job_ids: list[int] = []
         with self.connect() as connection:
             for item in items:
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO collection_jobs "
-                    "(symbol, timeframe, tier, priority, target_bars, status, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?)",
-                    (item["symbol"], item["timeframe"], item["tier"], item["priority"], item["target_bars"], now.isoformat(), now.isoformat()),
+                    "(symbol, timeframe, tier, priority, target_bars, target_level, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?)",
+                    (item["symbol"], item["timeframe"], item["tier"], item["priority"], item["target_bars"], item.get("target_level", "INITIAL"), now.isoformat(), now.isoformat()),
                 )
                 if cursor.lastrowid:
                     job_ids.append(int(cursor.lastrowid))

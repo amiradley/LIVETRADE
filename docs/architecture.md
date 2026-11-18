@@ -74,6 +74,14 @@ The quality engine validates finite positive OHLC values, candle relationships, 
 
 The collection scheduler is deliberately persistence-backed rather than an OS-level daemon. `collection-status` reports `active_scheduler=false` unless an explicit CLI/dashboard collection is running. The dashboard exposes `/api/historical`, audit, plan, bounded-start, pause, resume, and cancel controls; these endpoints have no order or account-mutation capability. Storage protection is checked before each batch, and collection pauses at the 90% disk threshold without deleting anything.
 
+## Stage 1.8 research dataset preparation
+
+Stage 1.8 adds a deterministic instrument-priority model, configurable historical targets, and explicit research-readiness state. The target policy is stored with each collection job: `INITIAL`, `INTERMEDIATE`, and `EXTENDED` levels are defined per supported timeframe. Full-depth audits page through MT5 history in bounded batches and preserve duplicate, ordering, gap, and terminal-call failures as quality evidence; they do not deduplicate or otherwise rewrite broker data during an audit.
+
+The instrument catalog stores priority tier, score, and reason. Tier 1 is capped at a diversified eligible core when the broker offers multiple eligible categories; Tier 2 is a deterministic ranked expansion; Tier 3 remains deferred. If the broker's eligible universe is concentrated in one category, the report records that limitation rather than promoting caution-only symbols into the core. Historical coverage separately records broker candle counts and local persisted counts, so broker availability cannot be mistaken for local research readiness. Provenance includes source status, dataset version, broker-time source, audit scope, target level, and collection job where applicable.
+
+The Stage 1.8 pilot remains bounded and read-only. Collection continues only while explicitly started by the CLI or dashboard, persists progress and retry errors, and pauses at the storage threshold. Higher-timeframe coverage is prioritized before broad M1 expansion; invalid or overlapping MT5 pages remain quarantined for investigation instead of being silently repaired. A `READY_FOR_*` state describes data sufficiency and structural quality only, never profitability or permission to trade.
+
 ## Stages 1.9–2.1 research intelligence
 
 `research_intelligence.py` is the unified research layer. `generate_hypotheses` creates stable, reproducible definitions for momentum, mean-reversion, breakout, and volatility families. Each hypothesis stores rationale, variables, signal timing, version, and falsification criteria. Experiments reference the existing `historical_candles` table rather than duplicating OHLC data.

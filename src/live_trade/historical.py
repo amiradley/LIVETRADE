@@ -17,6 +17,36 @@ from .timestamping import BrokerTimeConfig, TimestampConfigurationError
 TIMEFRAME_MINUTES = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440}
 DEFAULT_BATCH_SIZE = 200
 MIN_RESEARCH_BARS = 100
+TIMEFRAME_TARGETS = {
+    "M1": {"INITIAL": 5_000, "INTERMEDIATE": 25_000, "EXTENDED": 100_000},
+    "M5": {"INITIAL": 3_000, "INTERMEDIATE": 15_000, "EXTENDED": 60_000},
+    "M15": {"INITIAL": 2_000, "INTERMEDIATE": 10_000, "EXTENDED": 40_000},
+    "M30": {"INITIAL": 1_500, "INTERMEDIATE": 7_500, "EXTENDED": 30_000},
+    "H1": {"INITIAL": 1_000, "INTERMEDIATE": 5_000, "EXTENDED": 20_000},
+    "H4": {"INITIAL": 750, "INTERMEDIATE": 3_000, "EXTENDED": 12_000},
+    "D1": {"INITIAL": 500, "INTERMEDIATE": 2_000, "EXTENDED": 8_000},
+}
+TIMEFRAME_COLLECTION_PRIORITY = ("H1", "M15", "M5", "M30", "H4", "D1", "M1")
+
+
+def target_for(timeframe: str, level: str = "INITIAL") -> int:
+    return int(TIMEFRAME_TARGETS[timeframe.upper()][level.upper()])
+
+
+def research_readiness(candle_count: int, timeframe: str, data_quality: str, gap_count: int, target_level: str = "INITIAL") -> str:
+    if candle_count == 0:
+        return "NOT_COLLECTED"
+    if data_quality in {"INVALID", "ERROR"}:
+        return "INVALID"
+    if gap_count:
+        return "DEGRADED"
+    if candle_count >= target_for(timeframe, "EXTENDED") and target_level.upper() == "EXTENDED":
+        return "READY_FOR_EXTENDED_VALIDATION"
+    if candle_count >= target_for(timeframe, "INTERMEDIATE") and target_level.upper() in {"INTERMEDIATE", "EXTENDED"}:
+        return "READY_FOR_DEVELOPMENT_RESEARCH"
+    if candle_count >= target_for(timeframe, "INITIAL"):
+        return "READY_FOR_EXPLORATORY_RESEARCH"
+    return "INSUFFICIENT_DATA"
 
 
 def _utc(value: datetime) -> datetime:
@@ -157,6 +187,8 @@ class CollectionPlanItem:
     priority: float
     target_bars: int
     estimated_bytes: int
+    priority_reason: str = ""
+    target_level: str = "INITIAL"
 
     def to_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -180,33 +212,83 @@ class HistoricalDataEngine:
             for record in raw_records
             if not selected or str(record.get("name") or "").upper() in selected
         ]
+        ranked = sorted(classifications, key=lambda record: priority_for(record), reverse=True)
+        tier_one: list[str] = []
+        categories_seen: set[str] = set()
+        for record in ranked:
+            if record["suitability"] != "ELIGIBLE":
+                continue
+            if record["category"] not in categories_seen:
+                tier_one.append(record["symbol"])
+                categories_seen.add(record["category"])
+        for record in ranked:
+            if record["suitability"] == "ELIGIBLE" and len(tier_one) < 12 and record["symbol"] not in tier_one:
+                tier_one.append(record["symbol"])
+        tier_two_ordered = [
+            record["symbol"]
+            for record in ranked
+            if record["symbol"] not in tier_one and record["suitability"] in {"ELIGIBLE", "ELIGIBLE_WITH_CAUTION"}
+        ][:50]
+        tier_two = set(tier_two_ordered)
+        for record in classifications:
+            score = priority_for(record)
+            if record["symbol"] in tier_one:
+                tier, reason = "TIER1", "Eligible, high priority, and selected for category diversification"
+            elif record["symbol"] in tier_two:
+                tier, reason = "TIER2", "Potential research value but below the diversified core cutoff"
+            else:
+                tier, reason = "TIER3", "Deferred pending stronger suitability, data, liquidity, or storage evidence"
+            record["priority_score"] = score
+            record["priority_tier"] = tier
+            record["priority_reason"] = reason
         self._classifications = {record["symbol"]: record for record in classifications}
         self.store.save_instrument_classifications(classifications)
         return self.store.instrument_summary()
 
-    def audit(self, symbols: Sequence[str], timeframes: Sequence[str], bars: int = 200) -> list[QualityReport]:
+    def audit(self, symbols: Sequence[str], timeframes: Sequence[str], bars: int = 200, full_depth: bool = False, max_batches: int = 10, target_level: str = "INITIAL") -> list[QualityReport]:
         reports: list[QualityReport] = []
         for symbol in symbols:
             for timeframe in timeframes:
                 try:
-                    candles = self.client.get_candles(symbol, timeframe, bars)
+                    if full_depth:
+                        batches = []
+                        for batch_number in range(max_batches):
+                            batch = self.client.get_candles_batch(symbol, timeframe, batch_number * bars, bars)
+                            if not batch:
+                                break
+                            batches.append(batch)
+                            if len(batch) < bars:
+                                break
+                        candles = tuple(candle for batch in reversed(batches) for candle in batch)
+                    else:
+                        candles = self.client.get_candles(symbol, timeframe, bars)
                     report = validate_candles(symbol, timeframe, candles, self.broker_time)
+                    local_count = self.store.historical_summary_for(symbol, timeframe)["candles"]
                     self.store.save_coverage({
                         **report.to_dict(),
                         "audited_at": datetime.now(timezone.utc).isoformat(),
-                        "metadata": {"audit_scope": "latest_batch", "requested_bars": bars, "history_more_available": len(candles) >= bars},
+                        "metadata": {"audit_scope": "paged_history" if full_depth else "latest_batch", "requested_bars": bars, "batches": max_batches if full_depth else 1, "history_more_available": len(candles) >= bars * (max_batches if full_depth else 1)},
+                        "local_candle_count": local_count,
+                        "broker_candle_count": len(candles), "target_count": target_for(timeframe, target_level), "target_level": target_level,
+                        "source_status": "AVAILABLE" if candles else "NO_HISTORY", "dataset_version": f"{symbol.upper()}-{timeframe.upper()}-{len(candles)}",
+                        "research_readiness": research_readiness(local_count, timeframe, report.data_quality, report.gap_count, target_level),
+                        "provenance": {"broker_server": self.broker_time.server_name, "timestamp_source": self.broker_time.source, "collector": "HistoricalDataEngine", "full_depth": full_depth},
                     })
                 except Exception as exc:
                     report = QualityReport(symbol, timeframe, 0, 0, None, None, 0, 0, 0, "ERROR", False, "ERROR", "NOT_COLLECTED", ({"code": "retrieval_error", "message": str(exc)},))
                     self.store.save_coverage({
-                        **report.to_dict(), "audited_at": datetime.now(timezone.utc).isoformat(), "error": str(exc), "metadata": {"requested_bars": bars}
+                        **report.to_dict(), "audited_at": datetime.now(timezone.utc).isoformat(), "error": str(exc), "metadata": {"requested_bars": bars},
+                        "target_count": target_for(timeframe, target_level), "target_level": target_level, "source_status": "UNAVAILABLE",
+                        "research_readiness": "NOT_COLLECTED", "provenance": {"broker_server": self.broker_time.server_name, "timestamp_source": self.broker_time.source, "collector": "HistoricalDataEngine"},
                     })
                 reports.append(report)
         return reports
 
-    def preview(self, symbols: Sequence[str], timeframes: Sequence[str], tier: str = "TIER1", target_bars: int = 500) -> list[CollectionPlanItem]:
+    def preview(self, symbols: Sequence[str] | None, timeframes: Sequence[str], tier: str = "TIER1", target_bars: int | None = None, target_level: str = "INITIAL", max_symbols: int = 12) -> list[CollectionPlanItem]:
         if not self._classifications:
             self.classify(symbols)
+        if not symbols:
+            symbols = tuple(record["symbol"] for record in self._classifications.values() if record.get("priority_tier") == tier.upper())[:max_symbols]
         plan: list[CollectionPlanItem] = []
         for symbol in symbols:
             classification = self._classifications.get(symbol.upper())
@@ -214,7 +296,8 @@ class HistoricalDataEngine:
                 continue
             priority = priority_for(classification)
             for timeframe in timeframes:
-                plan.append(CollectionPlanItem(symbol.upper(), timeframe.upper(), tier, priority, target_bars, target_bars * 96))
+                target = target_bars or target_for(timeframe, target_level)
+                plan.append(CollectionPlanItem(symbol.upper(), timeframe.upper(), tier, priority, target, target * 96, classification.get("priority_reason", ""), target_level.upper()))
         return sorted(plan, key=lambda item: (-item.priority, item.symbol, item.timeframe))
 
     def collect(self, plan: Sequence[CollectionPlanItem], max_batches: int = 1, batch_size: int = DEFAULT_BATCH_SIZE, rate_limit_seconds: float = 0.05) -> dict[str, Any]:
@@ -256,6 +339,20 @@ class HistoricalDataEngine:
                         "quality_status": quality.data_quality, "quality_reasons": [issue.get("code") for issue in quality.issues], "collected_at": collected_at,
                     })
                 saved = self.store.save_historical_candles(records)
+                local = self.store.historical_summary_for(job["symbol"], job["timeframe"])
+                self.store.save_coverage({
+                    **quality.to_dict(),
+                    "audited_at": datetime.now(timezone.utc).isoformat(),
+                    "local_candle_count": local["candles"],
+                    "broker_candle_count": local["candles"],
+                    "target_count": int(job["target_bars"]),
+                    "target_level": job.get("target_level", "INITIAL"),
+                    "source_status": "COLLECTED",
+                    "dataset_version": f"{job['symbol']}-{job['timeframe']}-{local['candles']}",
+                    "research_readiness": research_readiness(local["candles"], job["timeframe"], quality.data_quality, quality.gap_count, job.get("target_level", "INITIAL")),
+                    "metadata": {"audit_scope": "collected_batches", "quality_batch_count": len(candles)},
+                    "provenance": {"broker_server": self.broker_time.server_name, "timestamp_source": self.broker_time.source, "collector": "HistoricalDataEngine", "collection_job_id": job["job_id"]},
+                })
                 downloaded = int(job["downloaded_bars"]) + len(candles)
                 status = "COMPLETE" if downloaded >= int(job["target_bars"]) else "QUEUED"
                 self.store.update_collection_job(job["job_id"], now, downloaded_bars=downloaded, next_start_position=int(job["next_start_position"]) + len(candles), status=status)
