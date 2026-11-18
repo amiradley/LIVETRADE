@@ -304,6 +304,7 @@ CREATE TABLE IF NOT EXISTS collection_events (
 );
 CREATE TABLE IF NOT EXISTS collection_batch_diagnostics (
     batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
     job_id INTEGER,
     created_at TEXT NOT NULL,
     symbol TEXT NOT NULL,
@@ -334,6 +335,39 @@ CREATE TABLE IF NOT EXISTS collection_batch_diagnostics (
     provenance_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_collection_batch_diag_job ON collection_batch_diagnostics(job_id, batch_id);
+CREATE TABLE IF NOT EXISTS collection_sessions (
+    session_id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    status TEXT NOT NULL,
+    stop_reason TEXT NOT NULL DEFAULT '',
+    symbols_json TEXT NOT NULL,
+    timeframes_json TEXT NOT NULL,
+    max_batches INTEGER NOT NULL,
+    max_candles INTEGER NOT NULL,
+    max_duration_seconds REAL NOT NULL,
+    max_storage_growth_bytes INTEGER NOT NULL,
+    initial_candle_count INTEGER NOT NULL DEFAULT 0,
+    final_candle_count INTEGER,
+    initial_storage_bytes INTEGER NOT NULL DEFAULT 0,
+    final_storage_bytes INTEGER,
+    requests_attempted INTEGER NOT NULL DEFAULT 0,
+    successful_requests INTEGER NOT NULL DEFAULT 0,
+    failed_requests INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    candles_retrieved INTEGER NOT NULL DEFAULT 0,
+    candles_persisted INTEGER NOT NULL DEFAULT 0,
+    duplicate_count INTEGER NOT NULL DEFAULT 0,
+    overlap_count INTEGER NOT NULL DEFAULT 0,
+    out_of_order_count INTEGER NOT NULL DEFAULT 0,
+    gap_count INTEGER NOT NULL DEFAULT 0,
+    invalid_count INTEGER NOT NULL DEFAULT 0,
+    forming_excluded INTEGER NOT NULL DEFAULT 0,
+    mt5_failure_count INTEGER NOT NULL DEFAULT 0,
+    memory_peak_mb REAL,
+    cpu_sample_percent REAL
+);
+CREATE INDEX IF NOT EXISTS idx_collection_sessions_started ON collection_sessions(started_at DESC);
 CREATE TABLE IF NOT EXISTS research_hypotheses (
     hypothesis_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -482,6 +516,10 @@ class MarketDataStore:
         }.items():
             if name not in job_columns:
                 connection.execute(f"ALTER TABLE collection_jobs ADD COLUMN {name} {definition}")
+        batch_columns = {row[1] for row in connection.execute("PRAGMA table_info(collection_batch_diagnostics)")}
+        if "session_id" not in batch_columns:
+            connection.execute("ALTER TABLE collection_batch_diagnostics ADD COLUMN session_id TEXT")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_collection_batch_diag_session ON collection_batch_diagnostics(session_id, batch_id)")
         technical_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(technical_analysis)")
         }
@@ -1078,10 +1116,10 @@ class MarketDataStore:
     def save_collection_batch_diagnostic(self, payload: dict[str, Any]) -> int:
         with self.connect() as connection:
             cursor = connection.execute(
-                "INSERT INTO collection_batch_diagnostics (job_id, created_at, symbol, timeframe, request_type, start_position, requested_from, requested_to, batch_size, returned_count, accepted_count, first_raw_time, last_raw_time, first_effective_time, last_effective_time, duplicate_count, overlap_count, gap_count, out_of_order_count, forming_count, quality_status, retry_count, duration_ms, mt5_error_code, mt5_error_description, result, message, provenance_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO collection_batch_diagnostics (session_id, job_id, created_at, symbol, timeframe, request_type, start_position, requested_from, requested_to, batch_size, returned_count, accepted_count, first_raw_time, last_raw_time, first_effective_time, last_effective_time, duplicate_count, overlap_count, gap_count, out_of_order_count, forming_count, quality_status, retry_count, duration_ms, mt5_error_code, mt5_error_description, result, message, provenance_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    payload.get("job_id"), payload["created_at"], payload["symbol"], payload["timeframe"], payload["request_type"],
+                    payload.get("session_id"), payload.get("job_id"), payload["created_at"], payload["symbol"], payload["timeframe"], payload["request_type"],
                     payload.get("start_position"), payload.get("requested_from"), payload.get("requested_to"), payload["batch_size"],
                     payload.get("returned_count", 0), payload.get("accepted_count", 0), payload.get("first_raw_time"), payload.get("last_raw_time"),
                     payload.get("first_effective_time"), payload.get("last_effective_time"), payload.get("duplicate_count", 0), payload.get("overlap_count", 0),
@@ -1091,6 +1129,39 @@ class MarketDataStore:
                 ),
             )
             return int(cursor.lastrowid)
+
+    def start_collection_session(self, payload: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO collection_sessions (session_id, started_at, status, symbols_json, timeframes_json, max_batches, max_candles, max_duration_seconds, max_storage_growth_bytes, initial_candle_count, initial_storage_bytes) VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?)",
+                (payload["session_id"], payload["started_at"], json.dumps(payload.get("symbols", [])), json.dumps(payload.get("timeframes", [])), payload["max_batches"], payload["max_candles"], payload["max_duration_seconds"], payload["max_storage_growth_bytes"], payload.get("initial_candle_count", 0), payload.get("initial_storage_bytes", 0)),
+            )
+
+    def finish_collection_session(self, session_id: str, ended_at: str, status: str, stop_reason: str, final_candle_count: int, final_storage_bytes: int, memory_peak_mb: float | None = None, cpu_sample_percent: float | None = None) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute("SELECT started_at FROM collection_sessions WHERE session_id=?", (session_id,)).fetchone()
+            diagnostics = connection.execute(
+                "SELECT COUNT(*), SUM(result='SUCCESS'), SUM(result='FAILED'), SUM(retry_count), SUM(returned_count), SUM(accepted_count), SUM(duplicate_count), SUM(overlap_count), SUM(out_of_order_count), SUM(gap_count), SUM(forming_count), SUM(mt5_error_code IS NOT NULL) FROM collection_batch_diagnostics WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            values = {
+                "ended_at": ended_at, "status": status, "stop_reason": stop_reason,
+                "final_candle_count": final_candle_count, "final_storage_bytes": final_storage_bytes,
+                "requests_attempted": int(diagnostics[0] or 0), "successful_requests": int(diagnostics[1] or 0), "failed_requests": int(diagnostics[2] or 0),
+                "retry_count": int(diagnostics[3] or 0), "candles_retrieved": int(diagnostics[4] or 0), "candles_persisted": int(diagnostics[5] or 0),
+                "duplicate_count": int(diagnostics[6] or 0), "overlap_count": int(diagnostics[7] or 0), "out_of_order_count": int(diagnostics[8] or 0),
+                "gap_count": int(diagnostics[9] or 0), "forming_excluded": int(diagnostics[10] or 0), "mt5_failure_count": int(diagnostics[11] or 0),
+                "memory_peak_mb": memory_peak_mb, "cpu_sample_percent": cpu_sample_percent,
+            }
+            assignments = ", ".join(f"{key}=?" for key in values)
+            connection.execute(f"UPDATE collection_sessions SET {assignments} WHERE session_id=?", (*values.values(), session_id))
+            return dict(connection.execute("SELECT * FROM collection_sessions WHERE session_id=?", (session_id,)).fetchone())
+
+    def collection_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            return [dict(row) for row in connection.execute("SELECT * FROM collection_sessions ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()]
 
     def recent_collection_batch_diagnostics(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as connection:

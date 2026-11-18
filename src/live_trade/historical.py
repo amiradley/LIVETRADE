@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -273,6 +274,7 @@ class HistoricalDataEngine:
     def _save_page_diagnostic(
         self,
         *,
+        session_id: str | None = None,
         job_id: int | None,
         symbol: str,
         timeframe: str,
@@ -294,6 +296,7 @@ class HistoricalDataEngine:
             effective_times = []
         mt5_error = (error or {}).get("mt5_error") or {}
         return self.store.save_collection_batch_diagnostic({
+            "session_id": session_id,
             "job_id": job_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol.upper(),
@@ -331,6 +334,7 @@ class HistoricalDataEngine:
         bars: int,
         max_batches: int,
         *,
+        session_id: str | None = None,
         job_id: int | None = None,
         start_cursor: datetime | None = None,
     ) -> list[tuple[Candle, ...]]:
@@ -369,10 +373,10 @@ class HistoricalDataEngine:
             duration_ms = (time.perf_counter() - started) * 1000
             if last_error is not None:
                 details = _error_details(last_error)
-                self._save_page_diagnostic(job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, retry_count=retries, duration_ms=duration_ms, result="FAILED", message=str(last_error), error=details)
+                self._save_page_diagnostic(session_id=session_id, job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, retry_count=retries, duration_ms=duration_ms, result="FAILED", message=str(last_error), error=details)
                 raise last_error
             if not candles:
-                self._save_page_diagnostic(job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, retry_count=retries, duration_ms=duration_ms, result="EMPTY", message="MT5 returned an empty page")
+                self._save_page_diagnostic(session_id=session_id, job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, retry_count=retries, duration_ms=duration_ms, result="EMPTY", message="MT5 returned an empty page")
                 break
             raw_times = [_raw_time(candle) for candle in candles]
             out_of_order = sum(1 for left, right in zip(raw_times, raw_times[1:]) if right <= left)
@@ -385,12 +389,12 @@ class HistoricalDataEngine:
             try:
                 accepted = tuple(candle for candle in candles if _is_complete(candle, timeframe, self.broker_time, datetime.now(timezone.utc)))
             except TimestampConfigurationError as exc:
-                self._save_page_diagnostic(job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, candles=candles, quality=quality, retry_count=retries, duration_ms=duration_ms, result="REJECTED", message=str(exc))
+                self._save_page_diagnostic(session_id=session_id, job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, candles=candles, quality=quality, retry_count=retries, duration_ms=duration_ms, result="REJECTED", message=str(exc))
                 raise
             if out_of_order or overlap:
-                self._save_page_diagnostic(job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, candles=candles, accepted=accepted, quality=quality, retry_count=retries, duration_ms=duration_ms, result="REJECTED", message="Historical page ordering or boundary overlap is ambiguous", overlap_count=overlap)
+                self._save_page_diagnostic(session_id=session_id, job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, candles=candles, accepted=accepted, quality=quality, retry_count=retries, duration_ms=duration_ms, result="REJECTED", message="Historical page ordering or boundary overlap is ambiguous", overlap_count=overlap)
                 raise ValueError(f"Ambiguous historical page for {symbol} {timeframe}: out_of_order={out_of_order}, overlap={overlap}")
-            self._save_page_diagnostic(job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, candles=candles, accepted=accepted, quality=quality, retry_count=retries, duration_ms=duration_ms)
+            self._save_page_diagnostic(session_id=session_id, job_id=job_id, symbol=symbol, timeframe=timeframe, request=request, candles=candles, accepted=accepted, quality=quality, retry_count=retries, duration_ms=duration_ms)
             pages.append(candles)
             seen_page_keys.update(keys)
             cursor = min(raw_times)
@@ -443,21 +447,49 @@ class HistoricalDataEngine:
                 plan.append(CollectionPlanItem(symbol.upper(), timeframe.upper(), tier, priority, target, target * 96, classification.get("priority_reason", ""), target_level.upper()))
         return sorted(plan, key=lambda item: (-item.priority, item.symbol, item.timeframe))
 
-    def collect(self, plan: Sequence[CollectionPlanItem], max_batches: int = 1, batch_size: int = DEFAULT_BATCH_SIZE, rate_limit_seconds: float = 0.05) -> dict[str, Any]:
+    def collect(
+        self,
+        plan: Sequence[CollectionPlanItem],
+        max_batches: int = 1,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        rate_limit_seconds: float = 0.05,
+        *,
+        session_id: str | None = None,
+        max_total_candles: int | None = None,
+        max_duration_seconds: float | None = None,
+        max_storage_growth_bytes: int | None = None,
+    ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         job_ids = self.store.create_collection_jobs([item.to_dict() for item in plan], now)
-        jobs = self.store.collection_jobs()
+        jobs = [job for job in self.store.collection_jobs() if job["job_id"] in set(job_ids)]
         batches = 0
+        collected_this_call = 0
+        failed_batches = 0
         paused = False
+        stop_reason = "COMPLETED_PLAN"
+        started_monotonic = time.monotonic()
+        initial_storage_bytes = self.storage_manager.scan().sqlite_size_bytes
         for job in jobs:
             if batches >= max_batches or job["status"] in {"COMPLETE", "CANCELLED", "PAUSED"}:
+                if batches >= max_batches:
+                    stop_reason = "MAX_BATCHES"
                 continue
             storage = self.storage_manager.scan()
             if storage.disk_used_percent >= 90:
                 self.store.update_collection_job(job["job_id"], now, status="PAUSED", last_error="Storage protection threshold reached")
                 self.store.collection_event(job["job_id"], "PAUSED_STORAGE", "Collection paused at the 90% disk threshold", now, storage.to_dict())
                 paused = True
+                stop_reason = "STORAGE_PROTECTION"
                 continue
+            if max_total_candles is not None and collected_this_call >= max_total_candles:
+                stop_reason = "MAX_CANDLES"
+                break
+            if max_duration_seconds is not None and time.monotonic() - started_monotonic >= max_duration_seconds:
+                stop_reason = "MAX_DURATION"
+                break
+            if max_storage_growth_bytes is not None and storage.sqlite_size_bytes - initial_storage_bytes >= max_storage_growth_bytes:
+                stop_reason = "MAX_STORAGE_GROWTH"
+                break
             attempt_time = datetime.now(timezone.utc)
             self.store.update_collection_job(job["job_id"], attempt_time, status="RUNNING", attempts=int(job["attempts"]) + 1, last_error=None, last_attempt_at=attempt_time.isoformat(), pagination_method="TIME_ANCHORED")
             try:
@@ -466,16 +498,22 @@ class HistoricalDataEngine:
                     self.store.update_collection_job(job["job_id"], attempt_time, status="COMPLETE", last_successful_at=attempt_time.isoformat())
                     continue
                 count = min(batch_size, remaining)
+                if max_total_candles is not None:
+                    count = min(count, max_total_candles - collected_this_call)
+                if count <= 0:
+                    stop_reason = "MAX_CANDLES"
+                    break
                 cursor = datetime.fromisoformat(job["next_start_time"]) if job.get("next_start_time") else None
                 if cursor is None and int(job["downloaded_bars"]) > 0:
                     bounds = self.store.historical_bounds(job["symbol"], job["timeframe"])
                     if bounds.get("earliest_raw"):
                         cursor = datetime.fromisoformat(str(bounds["earliest_raw"]))
-                pages = self._retrieve_pages(job["symbol"], job["timeframe"], count, 1, job_id=int(job["job_id"]), start_cursor=cursor)
+                pages = self._retrieve_pages(job["symbol"], job["timeframe"], count, 1, session_id=session_id, job_id=int(job["job_id"]), start_cursor=cursor)
                 if not pages:
                     message = "MT5 returned no candles"
                     self.store.update_collection_job(job["job_id"], attempt_time, status="FAILED", last_error=message)
                     self.store.collection_event(job["job_id"], "FAILED", message, attempt_time, {"symbol": job["symbol"], "timeframe": job["timeframe"], "requested_bars": count})
+                    failed_batches += 1
                     continue
                 candles = pages[0]
                 captured_at = datetime.now(timezone.utc)
@@ -502,6 +540,7 @@ class HistoricalDataEngine:
                     message = f"Persistence rejected {len(records) - saved} already-present candle(s); page was not advanced"
                     self.store.update_collection_job(job["job_id"], attempt_time, status="FAILED", last_error=message)
                     self.store.collection_event(job["job_id"], "DUPLICATE_PERSISTENCE", message, attempt_time, {"received": len(candles), "accepted": len(records), "saved": saved})
+                    failed_batches += 1
                     continue
                 local = self.store.historical_summary_for(job["symbol"], job["timeframe"])
                 self.store.save_coverage({
@@ -524,11 +563,67 @@ class HistoricalDataEngine:
                 self.store.update_collection_job(job["job_id"], completed_at, downloaded_bars=downloaded, next_start_position=int(job["next_start_position"]) + len(accepted), next_start_time=next_cursor.isoformat(), status=status, last_successful_at=completed_at.isoformat())
                 self.store.collection_event(job["job_id"], "BATCH_SAVED", f"Saved {saved} new historical candles; forming candles excluded: {len(candles) - len(accepted)}", completed_at, {"received": len(candles), "accepted": len(accepted), "saved": saved, "quality": quality.to_dict(), "next_start_time": next_cursor.isoformat()})
                 batches += 1
+                collected_this_call += len(accepted)
                 time.sleep(max(0.0, rate_limit_seconds))
             except Exception as exc:
                 self.store.update_collection_job(job["job_id"], attempt_time, status="FAILED", last_error=str(exc))
                 self.store.collection_event(job["job_id"], "FAILED", str(exc), attempt_time, {"error": _error_details(exc), "symbol": job["symbol"], "timeframe": job["timeframe"]})
-        return {"job_ids": job_ids, "batches": batches, "paused_for_storage": paused, "jobs": self.store.collection_jobs(), "historical": self.store.historical_summary()}
+                failed_batches += 1
+        if failed_batches:
+            stop_reason = "FAILED_BATCH"
+        return {"job_ids": job_ids, "batches": batches, "failed_batches": failed_batches, "candles_collected": collected_this_call, "paused_for_storage": paused, "stop_reason": stop_reason, "jobs": self.store.collection_jobs(), "historical": self.store.historical_summary()}
+
+    def collect_session(
+        self,
+        plan: Sequence[CollectionPlanItem],
+        *,
+        max_batches: int = 4,
+        batch_size: int = 50,
+        max_total_candles: int = 400,
+        max_duration_seconds: float = 300.0,
+        max_storage_growth_bytes: int = 16 * 1024 * 1024,
+        rate_limit_seconds: float = 0.25,
+    ) -> dict[str, Any]:
+        session_id = str(uuid.uuid4())
+        started_at = datetime.now(timezone.utc)
+        initial_storage = self.storage_manager.scan().sqlite_size_bytes
+        initial_candles = self.store.historical_summary()["candles"]
+        symbols = sorted({item.symbol for item in plan})
+        timeframes = sorted({item.timeframe for item in plan})
+        self.store.start_collection_session({
+            "session_id": session_id,
+            "started_at": started_at.isoformat(),
+            "symbols": symbols,
+            "timeframes": timeframes,
+            "max_batches": max_batches,
+            "max_candles": max_total_candles,
+            "max_duration_seconds": max_duration_seconds,
+            "max_storage_growth_bytes": max_storage_growth_bytes,
+            "initial_candle_count": initial_candles,
+            "initial_storage_bytes": initial_storage,
+        })
+        try:
+            result = self.collect(
+                plan,
+                max_batches=max_batches,
+                batch_size=batch_size,
+                rate_limit_seconds=rate_limit_seconds,
+                session_id=session_id,
+                max_total_candles=max_total_candles,
+                max_duration_seconds=max_duration_seconds,
+                max_storage_growth_bytes=max_storage_growth_bytes,
+            )
+            status = "FAILED" if result.get("failed_batches") else ("PAUSED" if result["paused_for_storage"] else "COMPLETED")
+            stop_reason = result["stop_reason"]
+        except Exception as exc:
+            result = {"job_ids": [], "batches": 0, "failed_batches": 1, "candles_collected": 0, "paused_for_storage": False, "stop_reason": "SESSION_ERROR", "error": str(exc), "jobs": self.store.collection_jobs(), "historical": self.store.historical_summary()}
+            status = "FAILED"
+            stop_reason = str(exc)
+        finally:
+            final_storage = self.storage_manager.scan().sqlite_size_bytes
+            session = self.store.finish_collection_session(session_id, datetime.now(timezone.utc).isoformat(), status, stop_reason, self.store.historical_summary()["candles"], final_storage)
+        result["session"] = session
+        return result
 
 
 class CollectionScheduler:
@@ -557,4 +652,4 @@ class CollectionScheduler:
         counts: dict[str, int] = {}
         for job in jobs:
             counts[job["status"]] = counts.get(job["status"], 0) + 1
-        return {"active_scheduler": False, "message": "Collection runs only while explicitly started by the CLI or dashboard.", "counts": counts, "jobs": jobs, "historical": self.store.historical_summary()}
+        return {"active_scheduler": False, "message": "Collection runs only while explicitly started by the CLI or dashboard.", "counts": counts, "jobs": jobs, "sessions": self.store.collection_sessions(), "historical": self.store.historical_summary()}

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from threading import RLock
+from types import SimpleNamespace
 
 from live_trade.historical import CollectionPlanItem, HistoricalDataEngine, target_for, validate_candles
 from live_trade.instrument_intelligence import classify_instrument, instrument_category
@@ -210,3 +211,80 @@ def test_transient_mt5_failure_retries_and_records_error_evidence(tmp_path, fake
     diagnostic = store.recent_collection_batch_diagnostics(1)[0]
     assert diagnostic["retry_count"] == 1
     assert calls["count"] == 2
+
+
+def test_collection_session_is_bounded_and_does_not_process_unplanned_queue_jobs(tmp_path, fake_mt5):
+    store = MarketDataStore(tmp_path / "market.sqlite3")
+    client = ReadOnlyMt5Client(api=fake_mt5)
+    client.connect()
+    fake_mt5.copy_rates_from_pos = lambda symbol, timeframe, start, count: [{
+        "time": int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()) - start * 60,
+        "open": 1.1, "high": 1.101, "low": 1.099, "close": 1.1005, "tick_volume": 42,
+        "spread": 2, "real_volume": 0,
+    }]
+    store.create_collection_jobs([{"symbol": "GBPUSD", "timeframe": "H1", "tier": "TIER1", "priority": 100, "target_bars": 10}], datetime.now(timezone.utc))
+    engine = HistoricalDataEngine(client, store, BrokerTimeConfig.with_offset(0), tmp_path)
+
+    result = engine.collect_session(
+        [CollectionPlanItem("EURUSD", "H1", "TIER1", 120, 2, 192)],
+        max_batches=1,
+        batch_size=2,
+        max_total_candles=1,
+        max_duration_seconds=30,
+        max_storage_growth_bytes=1024 * 1024,
+        rate_limit_seconds=0,
+    )
+
+    assert result["session"]["status"] == "COMPLETED"
+    assert result["session"]["candles_persisted"] == 1
+    jobs = {row["symbol"]: row for row in store.collection_jobs()}
+    assert jobs["GBPUSD"]["status"] == "QUEUED"
+    assert jobs["EURUSD"]["downloaded_bars"] == 1
+    assert len(store.collection_sessions()) == 1
+
+
+def test_collection_session_stops_at_storage_protection(tmp_path, fake_mt5):
+    store = MarketDataStore(tmp_path / "market.sqlite3")
+    client = ReadOnlyMt5Client(api=fake_mt5)
+    client.connect()
+    engine = HistoricalDataEngine(client, store, BrokerTimeConfig.with_offset(0), tmp_path)
+    engine.storage_manager.scan = lambda: SimpleNamespace(disk_used_percent=90.0, sqlite_size_bytes=100, to_dict=lambda: {"health_status": "PROTECTED"})
+
+    result = engine.collect_session(
+        [CollectionPlanItem("EURUSD", "H1", "TIER1", 120, 2, 192)],
+        max_batches=1,
+        batch_size=2,
+        max_total_candles=2,
+        max_duration_seconds=30,
+        max_storage_growth_bytes=1024,
+        rate_limit_seconds=0,
+    )
+
+    assert result["session"]["status"] == "PAUSED"
+    assert result["session"]["stop_reason"] == "STORAGE_PROTECTION"
+    assert result["batches"] == 0
+
+
+def test_persistent_mt5_failure_does_not_advance_cursor(tmp_path, fake_mt5):
+    store = MarketDataStore(tmp_path / "market.sqlite3")
+    client = ReadOnlyMt5Client(api=fake_mt5)
+    client.connect()
+    fake_mt5.last_error = lambda: (-1, "Terminal: Call failed")
+    fake_mt5.copy_rates_from_pos = lambda symbol, timeframe, start, count: None
+    engine = HistoricalDataEngine(client, store, BrokerTimeConfig.with_offset(0), tmp_path)
+
+    result = engine.collect_session(
+        [CollectionPlanItem("EURUSD", "H1", "TIER1", 120, 2, 192)],
+        max_batches=1,
+        batch_size=2,
+        max_total_candles=2,
+        max_duration_seconds=30,
+        max_storage_growth_bytes=1024 * 1024,
+        rate_limit_seconds=0,
+    )
+
+    assert result["session"]["status"] == "FAILED"
+    assert result["session"]["failed_requests"] == 1
+    job = store.collection_jobs()[0]
+    assert job["status"] == "FAILED"
+    assert job["next_start_time"] is None

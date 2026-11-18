@@ -87,7 +87,11 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--max-symbols", type=int, default=4)
     collect.add_argument("--max-batches", type=int, default=1)
     collect.add_argument("--batch-size", type=int, default=200)
+    collect.add_argument("--max-total-candles", type=int, default=400)
+    collect.add_argument("--max-duration-seconds", type=float, default=300.0)
+    collect.add_argument("--max-storage-growth-mb", type=int, default=16)
     subparsers.add_parser("collection-status", help="Show persisted collection status")
+    subparsers.add_parser("collection-sessions", help="Show persisted collection session history")
     subparsers.add_parser("collection-pause", help="Pause queued collection jobs")
     subparsers.add_parser("collection-resume", help="Resume paused collection jobs")
     subparsers.add_parser("collection-cancel", help="Cancel queued collection jobs")
@@ -112,13 +116,16 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
     if args.command == "storage":
         _print_json(StorageManager(settings.base_dir).scan().to_dict())
         return 0
-    if args.command.startswith("collection-") and args.command != "collection-plan":
+    if args.command.startswith("collection-") and args.command not in {"collection-plan", "collection-sessions"}:
         scheduler = CollectionScheduler(MarketDataStore(settings.db_path))
         if args.command == "collection-status":
             _print_json(scheduler.status())
         else:
             getattr(scheduler, args.command.removeprefix("collection-"))()
             _print_json(scheduler.status())
+        return 0
+    if args.command == "collection-sessions":
+        _print_json({"sessions": MarketDataStore(settings.db_path).collection_sessions()})
         return 0
     if args.command == "research-status":
         store = MarketDataStore(settings.db_path)
@@ -154,7 +161,14 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
             engine = HistoricalDataEngine(client, MarketDataStore(settings.db_path), settings.broker_time, settings.base_dir)
             symbols = tuple(item.upper() for item in args.symbol) if args.symbol else None
             plan = engine.preview(symbols, tuple(args.timeframe or ("H1", "M15")), args.tier, args.bars, args.target_level, args.max_symbols)
-            result = engine.collect(plan, max_batches=args.max_batches, batch_size=args.batch_size)
+            result = engine.collect_session(
+                plan,
+                max_batches=args.max_batches,
+                batch_size=min(args.batch_size, 200),
+                max_total_candles=args.max_total_candles,
+                max_duration_seconds=args.max_duration_seconds,
+                max_storage_growth_bytes=args.max_storage_growth_mb * 1024 * 1024,
+            )
             _print_json(result)
         elif args.command == "discover":
             instruments = client.discover_instruments()

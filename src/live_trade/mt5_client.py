@@ -53,7 +53,7 @@ def _python_scalar(value: Any) -> Any:
 def _record_to_dict(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
-    if isinstance(value, (tuple, list)) and len(value) >= 2:
+    if isinstance(value, (tuple, list)) and len(value) == 2:
         return {"code": _python_scalar(value[0]), "description": _python_scalar(value[1]), "value": [_python_scalar(value[0]), _python_scalar(value[1])]}
     if hasattr(value, "_asdict"):
         return {key: _python_scalar(item) for key, item in value._asdict().items()}

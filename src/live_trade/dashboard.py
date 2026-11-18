@@ -466,8 +466,8 @@ class DashboardService:
                 self.client.connect()
             try:
                 symbols = self.settings.symbols or ("EURUSD",)
-                plan = self.historical_engine.preview(symbols, ("M1", "M5"), "TIER1", 500)
-                result = self.historical_engine.collect(plan, max_batches=1, batch_size=100)
+                plan = self.historical_engine.preview(symbols, ("H1", "M15"), "TIER1", None, "INITIAL", 4)
+                result = self.historical_engine.collect_session(plan, max_batches=1, batch_size=50, max_total_candles=100, max_duration_seconds=120.0, max_storage_growth_bytes=8 * 1024 * 1024, rate_limit_seconds=0.25)
                 return {"result": result, **self.historical()}
             finally:
                 if owns_connection:

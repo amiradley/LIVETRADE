@@ -90,6 +90,12 @@ The historical collector uses a position request only for the newest bounded pag
 
 MT5 raw epoch labels remain preserved as broker-time labels. For the verified MetaQuotes-Demo configuration, effective UTC is calculated once by subtracting UTC+2; live tick and historical candle checks use the same conversion. The collector excludes incomplete current candles from research persistence by default. Existing records are not deleted or rewritten, and a structural `READY` or `READY_FOR_*` state remains distinct from research validity or strategy validation.
 
+## Stage 1.8B controlled expansion
+
+Collection sessions are persisted independently from collection jobs. A session has an explicit symbol/timeframe scope, maximum batches, maximum accepted candles, maximum duration, and maximum SQLite growth. It captures request counts, retries, MT5 failures, retrieved/persisted candles, overlap/duplicate/order/gap/invalid findings, forming candles excluded, final storage, and stop reason. The engine filters execution to the plan's job IDs, so starting a Tier 1 pilot cannot accidentally drain unrelated queued jobs.
+
+The CLI and dashboard use conservative H1/M15 session defaults. Session boundaries are application-level only; no Windows scheduler or continuous restart loop is installed. A successful session means only that its bounded data requests passed the current structural gates. It does not promote a dataset to research-ready status or validate a strategy. Tier 2/Tier 3 and broad M1 collection remain deferred until repeated Tier 1 sessions provide sufficient coverage and reliability evidence.
+
 ## Stages 1.9–2.1 research intelligence
 
 `research_intelligence.py` is the unified research layer. `generate_hypotheses` creates stable, reproducible definitions for momentum, mean-reversion, breakout, and volatility families. Each hypothesis stores rationale, variables, signal timing, version, and falsification criteria. Experiments reference the existing `historical_candles` table rather than duplicating OHLC data.
