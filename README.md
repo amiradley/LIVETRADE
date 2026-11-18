@@ -96,6 +96,8 @@ Stage 1.8B adds bounded collection sessions for progressive Tier 1 expansion. A 
 
 Stage 1.8C adds Windows-native, read-only resource snapshots to bounded sessions. System RAM and disk usage are sampled with explicit warning/protection/critical states; SQLite growth remains independently capped. Process RAM and CPU are reported as unavailable when a safe native measurement is not available, never as zero. Protection states pause new collection requests without deleting data. The four pilot instruments and H1/M15 scope remain the only expansion scope.
 
+The first-demo pathway is represented by the read-only trial-readiness report and the trial-readiness API endpoint. It distinguishes data, research, strategy, validation, risk-control, execution, STOP/recovery, monitoring, and authorization gates. The report cannot approve a strategy or enable execution; the current MT5 adapter remains read-only.
+
 The research intelligence layer provides reproducible hypothesis records, bounded OHLC backtests with explicit spread/slippage assumptions, train/out-of-sample separation, validation outcomes, evidence records, and persistent learning observations. It is deliberately conservative: small samples produce inconclusive results, rejected hypotheses remain stored, and no research status grants execution approval.
 
 ## Tests

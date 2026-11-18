@@ -19,6 +19,7 @@ from .scanner import MarketScanner, ScannerConfig
 from .storage import MarketDataStore
 from .storage_manager import StorageManager
 from .technical import TechnicalAnalyzer, analyze_multi_timeframe
+from .trial_readiness import build_trial_readiness
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -101,6 +102,7 @@ def _parser() -> argparse.ArgumentParser:
     research.add_argument("--limit", type=int, default=4)
     research.add_argument("--rerun", action="store_true", help="Repeat completed experiments for audit comparison")
     subparsers.add_parser("research-status", help="Show persisted research and validation status")
+    subparsers.add_parser("trial-readiness", help="Show the read-only first-demo trial readiness gate")
     return parser
 
 
@@ -130,6 +132,9 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
     if args.command == "research-status":
         store = MarketDataStore(settings.db_path)
         _print_json({"summary": store.research_summary(), "experiments": store.research_rows("research_experiments"), "validations": store.research_rows("validation_runs")})
+        return 0
+    if args.command == "trial-readiness":
+        _print_json(build_trial_readiness(MarketDataStore(settings.db_path)))
         return 0
     if args.command == "research-run":
         _print_json(ResearchService(MarketDataStore(settings.db_path)).run(args.symbol, args.timeframe, args.limit, args.rerun))

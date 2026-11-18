@@ -52,6 +52,17 @@ def test_dashboard_exposes_historical_data_status(tmp_path, fake_mt5):
     assert report["historical"]["candles"] == 0
 
 
+def test_dashboard_exposes_trial_readiness_without_enabling_execution(tmp_path, fake_mt5):
+    from live_trade.mt5_client import ReadOnlyMt5Client
+
+    service = DashboardService(dashboard_settings(tmp_path), client=ReadOnlyMt5Client(api=fake_mt5))
+    report = service.trial_readiness()
+
+    assert report["overall_status"] == "NOT_READY"
+    assert report["execution_enabled"] is False
+    assert any(gate["name"] == "authorization" and gate["status"] == "BLOCKED" for gate in report["gates"])
+
+
 def test_dashboard_start_stop_and_duplicate_prevention(tmp_path, fake_mt5, monkeypatch):
     from live_trade.mt5_client import ReadOnlyMt5Client
 

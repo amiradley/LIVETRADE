@@ -24,6 +24,7 @@ from .research_intelligence import ResearchService
 from .session import SessionError, SessionMode, SessionState, TradingSessionController
 from .storage import MarketDataStore
 from .storage_manager import StorageManager
+from .trial_readiness import build_trial_readiness
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
@@ -490,6 +491,10 @@ class DashboardService:
             result = self.research_service.run(symbol, "M1", limit=4)
             return {"result": result, **self.research()}
 
+    def trial_readiness(self) -> dict[str, Any]:
+        with self.lock:
+            return build_trial_readiness(self.store)
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "LIVE-TRADING-Dashboard/0.1"
@@ -530,6 +535,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send_file(WEB_ROOT / "styles.css", "text/css; charset=utf-8")
             if path == "/app.js":
                 return self._send_file(WEB_ROOT / "app.js", "text/javascript; charset=utf-8")
+            if path == "/readiness.js":
+                return self._send_file(WEB_ROOT / "readiness.js", "text/javascript; charset=utf-8")
             if path == "/api/overview":
                 return self._send(self.service.overview())
             if path == "/api/status":
@@ -546,6 +553,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send(self.service.historical())
             if path == "/api/research":
                 return self._send(self.service.research())
+            if path == "/api/trial-readiness":
+                return self._send(self.service.trial_readiness())
             return self._send({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             LOGGER.exception("Dashboard request failed")

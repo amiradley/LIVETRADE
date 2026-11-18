@@ -20,6 +20,7 @@
         <button class="nav-item" data-section="storage">Storage Manager</button>
         <button class="nav-item" data-section="historical">Historical Data</button>
         <button class="nav-item" data-section="research">Research Intelligence</button>
+        <button class="nav-item" data-section="trial-readiness">Trial Readiness</button>
         <button class="nav-item" data-section="settings">Settings</button>
       </nav>
       <div class="sidebar-note"><span class="dot"></span><span>Execution disabled<br><small>Research / demo-shadow only</small></span></div>
@@ -55,9 +56,11 @@
       <section id="section-storage" class="page-section"><div class="section-heading"><div><p class="eyebrow">SAFE RETENTION</p><h2>Storage manager</h2></div><span class="muted">Dry-run only</span></div><div id="storage-panel" class="panel"></div></section>
       <section id="section-historical" class="page-section"><div class="section-heading"><div><p class="eyebrow">RESEARCH DATASET</p><h2>Historical data intelligence</h2></div><span class="muted">Read-only collection</span></div><div class="session-actions"><button id="historical-audit" class="button secondary">Audit history</button><button id="historical-plan" class="button secondary">Preview plan</button><button id="historical-start" class="button primary">Collect one batch</button><button id="historical-pause" class="button secondary">Pause</button><button id="historical-resume" class="button secondary">Resume</button><button id="historical-cancel" class="button danger">Cancel</button></div><div id="historical-panel" class="panel"></div></section>
       <section id="section-research" class="page-section"><div class="section-heading"><div><p class="eyebrow">EVIDENCE FIRST</p><h2>Research intelligence</h2></div><span class="muted">No execution approval</span></div><div class="session-actions"><button id="research-start" class="button primary">Run bounded research</button></div><div id="research-panel" class="panel"></div></section>
+      <section id="section-trial-readiness" class="page-section"><div class="section-heading"><div><p class="eyebrow">CONTROLLED EXPERIMENT</p><h2>Demo trial readiness</h2></div><span class="muted">Execution disabled</span></div><div id="trial-readiness-panel" class="panel"></div></section>
       <section id="section-settings" class="page-section"><div class="section-heading"><div><p class="eyebrow">SYSTEM</p><h2>Settings</h2></div></div><div id="settings-panel" class="panel settings-grid"></div></section>
     </main>
   </div>
   <script src="/app.js"></script>
+  <script src="/readiness.js"></script>
 </body>
 </html>
