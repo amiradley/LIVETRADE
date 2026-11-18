@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .config import Settings
+from .execution import DemoOnlyExecutionAdapter, ExecutionError
 from .finance import FinancialDataService, FinancialSnapshot
 from .historical import CollectionScheduler, HistoricalDataEngine
 from .intelligence import FinancialIntelligenceService, FinancialIntelligenceSnapshot
@@ -24,6 +25,8 @@ from .research_intelligence import ResearchService
 from .session import SessionError, SessionMode, SessionState, TradingSessionController
 from .storage import MarketDataStore
 from .storage_manager import StorageManager
+from .technical import TechnicalAnalyzer
+from .trade_decision import build_experimental_decision
 from .trial_readiness import build_trial_readiness
 
 LOGGER = logging.getLogger(__name__)
@@ -226,6 +229,7 @@ class DashboardService:
         )
         self.last_successful: dict[str, Any] | None = None
         self.last_error: str | None = None
+        self.last_execution_result: dict[str, Any] | None = None
 
     def _capture_live(self) -> dict[str, Any]:
         with self.client_lock:
@@ -491,6 +495,118 @@ class DashboardService:
             result = self.research_service.run(symbol, "M1", limit=4)
             return {"result": result, **self.research()}
 
+    def start_demo_execution(self) -> dict[str, Any]:
+        with self.lock, self.client_lock:
+            symbol = self.settings.symbols[0] if self.settings.symbols else "EURUSD"
+            timeframe = "M1"
+            self.client.connect()
+            try:
+                adapter = DemoOnlyExecutionAdapter(self.client.api, self.store)
+                try:
+                    identity = adapter.verify_demo_identity()
+                except ExecutionError as exc:
+                    result = {
+                        "mode": SessionMode.DEMO_EXECUTION.value,
+                        "status": "BLOCKED",
+                        "stage": "DEMO_GUARD",
+                        "execution_enabled": False,
+                        "error": str(exc),
+                    }
+                    self.last_execution_result = result
+                    return result
+                tick = self.client.get_tick(symbol)
+                candles = self.client.get_candles(symbol, timeframe, 100)
+                analysis = TechnicalAnalyzer(minimum_history=50).analyze(symbol, timeframe, candles, closed_only=True)
+                decision = build_experimental_decision(analysis, tick, candles)
+                base = {
+                    "mode": SessionMode.DEMO_EXECUTION.value,
+                    "execution_enabled": False,
+                    "account": identity["account"],
+                    "terminal": identity["terminal"],
+                    "analysis": analysis.to_dict(),
+                    "decision": decision.to_dict(),
+                    "risk": adapter.risk_snapshot(),
+                }
+                try:
+                    adapter.verify_execution_permissions()
+                except ExecutionError as exc:
+                    result = {**base, "status": "BLOCKED", "stage": "PERMISSION_CHECK", "execution": {"status": "BLOCKED", "error": str(exc)}}
+                    self.last_execution_result = result
+                    return result
+                if decision.decision == "NO_TRADE":
+                    result = {**base, "status": "NO_TRADE", "stage": "DECISION", "execution": {"status": "NO_TRADE"}}
+                    self.last_execution_result = result
+                    return result
+                try:
+                    execution = adapter.submit(decision.to_dict())
+                    result = {**base, "status": execution["status"], "stage": "POSITION_OPEN", "execution_enabled": True, "execution": execution}
+                except ExecutionError as exc:
+                    result = {**base, "status": "BLOCKED", "stage": "EXECUTION", "execution": {"status": "ERROR", "error": str(exc)}}
+                self.last_execution_result = result
+                return result
+            finally:
+                self.client.disconnect()
+
+    def analyze_demo_execution(self) -> dict[str, Any]:
+        """Run the real dashboard market-analysis path without any order capability."""
+        with self.lock, self.client_lock:
+            symbol = self.settings.symbols[0] if self.settings.symbols else "EURUSD"
+            timeframe = "M1"
+            self.client.connect()
+            try:
+                adapter = DemoOnlyExecutionAdapter(self.client.api, self.store)
+                identity = adapter.verify_demo_identity()
+                tick = self.client.get_tick(symbol)
+                candles = self.client.get_candles(symbol, timeframe, 100)
+                analysis = TechnicalAnalyzer(minimum_history=50).analyze(symbol, timeframe, candles, closed_only=True)
+                decision = build_experimental_decision(analysis, tick, candles)
+                result = {
+                    "mode": SessionMode.DEMO_EXECUTION.value,
+                    "status": decision.decision,
+                    "stage": "DECISION",
+                    "execution_enabled": False,
+                    "account": identity["account"],
+                    "terminal": identity["terminal"],
+                    "analysis": analysis.to_dict(),
+                    "decision": decision.to_dict(),
+                    "risk": adapter.risk_snapshot(),
+                    "message": "Analysis-only path; no order capability was invoked.",
+                }
+                self.last_execution_result = result
+                return result
+            finally:
+                self.client.disconnect()
+
+    def stop_demo_execution(self) -> dict[str, Any]:
+        with self.lock, self.client_lock:
+            self.client.connect()
+            try:
+                positions = self.client.positions()
+            finally:
+                self.client.disconnect()
+            status = "STOPPED_WITH_OPEN_POSITIONS" if positions else "STOPPED"
+            result = {
+                "mode": SessionMode.DEMO_EXECUTION.value,
+                "status": status,
+                "stage": "STOP",
+                "execution_enabled": False,
+                "new_entries_blocked": True,
+                "positions": list(positions),
+                "message": "New demo entries are blocked; existing positions were not closed.",
+            }
+            self.last_execution_result = result
+            return result
+
+    def execution_status(self) -> dict[str, Any]:
+        with self.lock:
+            return self.last_execution_result or {
+                "mode": SessionMode.DEMO_EXECUTION.value,
+                "status": "STOPPED",
+                "stage": "IDLE",
+                "execution_enabled": False,
+                "message": "No demo-execution attempt has been started.",
+            }
+
     def trial_readiness(self) -> dict[str, Any]:
         with self.lock:
             return build_trial_readiness(self.store)
@@ -537,6 +653,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send_file(WEB_ROOT / "app.js", "text/javascript; charset=utf-8")
             if path == "/readiness.js":
                 return self._send_file(WEB_ROOT / "readiness.js", "text/javascript; charset=utf-8")
+            if path == "/execution.js":
+                return self._send_file(WEB_ROOT / "execution.js", "text/javascript; charset=utf-8")
             if path == "/api/overview":
                 return self._send(self.service.overview())
             if path == "/api/status":
@@ -555,6 +673,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send(self.service.research())
             if path == "/api/trial-readiness":
                 return self._send(self.service.trial_readiness())
+            if path == "/api/execution":
+                return self._send(self.service.execution_status())
             return self._send({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             LOGGER.exception("Dashboard request failed")
@@ -567,6 +687,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send(self.service.start())
             if path == "/api/session/stop":
                 return self._send(self.service.stop())
+            if path == "/api/session/start-demo-execution":
+                return self._send(self.service.start_demo_execution())
+            if path == "/api/session/analyze-demo-execution":
+                return self._send(self.service.analyze_demo_execution())
+            if path == "/api/session/stop-demo-execution":
+                return self._send(self.service.stop_demo_execution())
             if path == "/api/historical/audit":
                 return self._send(self.service.historical_audit())
             if path == "/api/historical/plan":

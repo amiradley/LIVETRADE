@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -372,6 +373,26 @@ CREATE TABLE IF NOT EXISTS collection_sessions (
     resource_protection_events INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_collection_sessions_started ON collection_sessions(started_at DESC);
+CREATE TABLE IF NOT EXISTS execution_orders (
+    signal_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    entry REAL,
+    stop_loss REAL,
+    take_profit REAL,
+    volume REAL,
+    risk_amount REAL,
+    order_ticket INTEGER,
+    position_ticket INTEGER,
+    request_json TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    realized_pnl REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_orders_status ON execution_orders(status, updated_at DESC);
 CREATE TABLE IF NOT EXISTS research_hypotheses (
     hypothesis_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -1265,6 +1286,49 @@ class MarketDataStore:
                 "UPDATE research_experiments SET status=?, progress=?, failure_reason=?, updated_at=datetime('now') WHERE experiment_id=?",
                 (status, progress, failure_reason, experiment_id),
             )
+
+    def execution_order(self, signal_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute("SELECT * FROM execution_orders WHERE signal_id=?", (signal_id,)).fetchone()
+            return dict(row) if row is not None else None
+
+    def save_execution_order(self, payload: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO execution_orders
+                (signal_id,status,symbol,timeframe,direction,entry,stop_loss,take_profit,volume,risk_amount,
+                 order_ticket,position_ticket,request_json,result_json,realized_pnl,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    payload["signal_id"], payload["status"], payload["symbol"], payload["timeframe"],
+                    payload["direction"], payload.get("entry"), payload.get("stop_loss"), payload.get("take_profit"),
+                    payload.get("volume"), payload.get("risk_amount"), payload.get("order_ticket"),
+                    payload.get("position_ticket"), payload.get("request_json", "{}"), payload.get("result_json", "{}"),
+                    payload.get("realized_pnl"), payload["created_at"], payload["updated_at"],
+                ),
+            )
+
+    def update_execution_order(self, signal_id: str, **values: Any) -> None:
+        if not values:
+            return
+        values["updated_at"] = values.get("updated_at") or datetime.now(timezone.utc).isoformat()
+        assignments = ", ".join(f"{key}=?" for key in values)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE execution_orders SET {assignments} WHERE signal_id=?",
+                (*values.values(), signal_id),
+            )
+
+    def execution_orders(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT * FROM execution_orders ORDER BY updated_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def research_rows(self, table: str, limit: int = 100) -> list[dict[str, Any]]:
         allowed = {"research_hypotheses", "research_experiments", "backtest_results", "validation_runs", "learning_observations", "strategy_versions", "research_evidence", "research_priorities"}

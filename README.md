@@ -98,6 +98,8 @@ Stage 1.8C adds Windows-native, read-only resource snapshots to bounded sessions
 
 The first-demo pathway is represented by the read-only trial-readiness report and the trial-readiness API endpoint. It distinguishes data, research, strategy, validation, risk-control, execution, STOP/recovery, monitoring, and authorization gates. The report cannot approve a strategy or enable execution; the current MT5 adapter remains read-only.
 
+The guarded DEMO execution pathway is separate from DEMO_SHADOW. It uses DemoOnlyExecutionAdapter, which enforces demo identity, terminal permissions, broker lot/tick specifications, spread and protective-stop checks, the RM100-equivalent budget, duplicate signal protection, persistent order state, and broker-position reconciliation. Dashboard START remains shadow-only; the separate Demo Execution panel cannot submit while terminal automated trading is disabled.
+
 The research intelligence layer provides reproducible hypothesis records, bounded OHLC backtests with explicit spread/slippage assumptions, train/out-of-sample separation, validation outcomes, evidence records, and persistent learning observations. It is deliberately conservative: small samples produce inconclusive results, rejected hypotheses remain stored, and no research status grants execution approval.
 
 ## Tests

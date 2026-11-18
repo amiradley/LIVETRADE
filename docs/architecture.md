@@ -100,6 +100,8 @@ Stage 1.8C attaches a `ResourceMonitor` to collection sessions. It samples syste
 
 The first-demo reassessment adds a read-only trial-readiness projection. It reads actual historical rows, collection jobs, research experiments, validation outcomes, and strategy-version approvals, then reports a conservative lifecycle stage and explicit blockers. It does not infer execution capability from broker account flags: the read-only MT5 client exposes no order mutation API, so execution and operational risk gates remain blocked until a separately authorized implementation and verification phase.
 
+The minimum execution implementation is isolated in DemoOnlyExecutionAdapter and does not alter ReadOnlyMt5Client. It requires ACCOUNT_TRADE_MODE_DEMO, a demo server identity, connected terminal permissions, a protective stop, broker-compatible symbol volume, spread and risk checks, a unique signal, and post-submit position reconciliation. A rejected, timed-out, or unreconciled order is never reported as filled. The dashboard exposes a separate DEMO_EXECUTION route and panel; the existing DEMO_SHADOW START/STOP behavior is unchanged.
+
 ## Stages 1.9–2.1 research intelligence
 
 `research_intelligence.py` is the unified research layer. `generate_hypotheses` creates stable, reproducible definitions for momentum, mean-reversion, breakout, and volatility families. Each hypothesis stores rationale, variables, signal timing, version, and falsification criteria. Experiments reference the existing `historical_candles` table rather than duplicating OHLC data.

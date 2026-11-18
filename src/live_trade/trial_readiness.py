@@ -152,15 +152,15 @@ def build_trial_readiness(store: Any) -> dict[str, Any]:
         ),
         _gate(
             "risk_controls",
-            "BLOCKED",
-            "Operational demo risk limits, spread/slippage gates, duplicate-order prevention, and reconciliation are not implemented.",
-            {"execution_enabled": False},
+            "PARTIAL",
+            "The guarded adapter implements the RM100-equivalent budget, one-position limit, broker lot sizing, spread/SL checks, duplicate prevention, and reconciliation; a supervised live execution test has not passed.",
+            {"execution_enabled": False, "adapter_risk_controls": True, "supervised_execution_verified": False},
         ),
         _gate(
             "execution",
             "BLOCKED",
-            "The MT5 adapter is deliberately read-only and exposes no order mutation path.",
-            {"adapter": "ReadOnlyMt5Client", "execution_enabled": False},
+            "The guarded DEMO adapter exists, but terminal automated trading permission is currently disabled and no broker order has been submitted.",
+            {"adapter": "DemoOnlyExecutionAdapter", "terminal_trade_allowed": False, "execution_enabled": False},
         ),
         _gate(
             "stop_recovery",

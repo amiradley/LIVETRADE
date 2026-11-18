@@ -20,6 +20,7 @@ class SessionState(str, Enum):
 class SessionMode(str, Enum):
     RESEARCH = "RESEARCH"
     DEMO_SHADOW = "DEMO_SHADOW"
+    DEMO_EXECUTION = "DEMO_EXECUTION"
 
 
 class SessionError(RuntimeError):
