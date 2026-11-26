@@ -174,6 +174,17 @@ class DemoOnlyExecutionAdapter:
             raise OrderValidationError("Current bid/ask is invalid")
         return tick
 
+    def _filling_mode(self, info: Mapping[str, Any]) -> int:
+        """Map the broker's SYMBOL_FILLING_* bitmask to ORDER_FILLING_* constants."""
+        mask = int(info.get("filling_mode") or 0)
+        if mask & 1:  # SYMBOL_FILLING_FOK
+            return int(getattr(self.api, "ORDER_FILLING_FOK", 0))
+        if mask & 2:  # SYMBOL_FILLING_IOC
+            return int(getattr(self.api, "ORDER_FILLING_IOC", 1))
+        if mask & 4:  # SYMBOL_FILLING_BOC
+            return int(getattr(self.api, "ORDER_FILLING_BOC", 3))
+        return int(getattr(self.api, "ORDER_FILLING_RETURN", 2))
+
     def calculate_volume(self, symbol: str, entry: float, stop_loss: float, risk_usd: float, info: Mapping[str, Any] | None = None) -> tuple[float, float]:
         info = info or self._symbol_info(symbol)
         point = _number(info.get("point"), "symbol point")
@@ -262,9 +273,9 @@ class DemoOnlyExecutionAdapter:
             "tp": take_profit,
             "deviation": deviation_points,
             "magic": 260001,
-            "comment": "LIVE-TRADING experimental demo",
+            "comment": "LT-DEMO",
             "type_time": getattr(self.api, "ORDER_TIME_GTC", 0),
-            "type_filling": getattr(self.api, "ORDER_FILLING_IOC", 1),
+            "type_filling": self._filling_mode(info),
         }
         self.store.save_execution_order({
             "signal_id": signal_id, "status": "PENDING", "symbol": symbol, "timeframe": timeframe,

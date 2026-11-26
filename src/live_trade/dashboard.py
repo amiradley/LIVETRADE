@@ -19,6 +19,7 @@ from .execution import DemoOnlyExecutionAdapter, ExecutionError
 from .finance import FinancialDataService, FinancialSnapshot
 from .historical import CollectionScheduler, HistoricalDataEngine
 from .intelligence import FinancialIntelligenceService, FinancialIntelligenceSnapshot
+from .market_validation import MarketDataValidationError, validate_decision_market_data
 from .mt5_client import ReadOnlyMt5Client
 from .research import ResearchWorker
 from .research_intelligence import ResearchService
@@ -516,6 +517,30 @@ class DashboardService:
                     return result
                 tick = self.client.get_tick(symbol)
                 candles = self.client.get_candles(symbol, timeframe, 100)
+                try:
+                    market_data = validate_decision_market_data(
+                        symbol, timeframe, tick, candles, self.settings.broker_time
+                    )
+                except MarketDataValidationError as exc:
+                    result = {
+                        "mode": SessionMode.DEMO_EXECUTION.value,
+                        "status": "BLOCKED",
+                        "stage": "DATA_QUALITY",
+                        "execution_enabled": False,
+                        "account": identity["account"],
+                        "terminal": identity["terminal"],
+                        "error": str(exc),
+                        "market_data": {
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "captured_at": datetime.now(timezone.utc).isoformat(),
+                            "timestamp_configuration": self.settings.broker_time.to_dict(),
+                            "candle_count": len(candles),
+                            "latest_candle_time": candles[-1].time.isoformat() if candles else None,
+                        },
+                    }
+                    self.last_execution_result = result
+                    return result
                 analysis = TechnicalAnalyzer(minimum_history=50).analyze(symbol, timeframe, candles, closed_only=True)
                 decision = build_experimental_decision(analysis, tick, candles)
                 base = {
@@ -525,6 +550,7 @@ class DashboardService:
                     "terminal": identity["terminal"],
                     "analysis": analysis.to_dict(),
                     "decision": decision.to_dict(),
+                    "market_data": market_data.to_dict(),
                     "risk": adapter.risk_snapshot(),
                 }
                 try:
@@ -558,6 +584,31 @@ class DashboardService:
                 identity = adapter.verify_demo_identity()
                 tick = self.client.get_tick(symbol)
                 candles = self.client.get_candles(symbol, timeframe, 100)
+                try:
+                    market_data = validate_decision_market_data(
+                        symbol, timeframe, tick, candles, self.settings.broker_time
+                    )
+                except MarketDataValidationError as exc:
+                    result = {
+                        "mode": SessionMode.DEMO_EXECUTION.value,
+                        "status": "BLOCKED",
+                        "stage": "DATA_QUALITY",
+                        "execution_enabled": False,
+                        "account": identity["account"],
+                        "terminal": identity["terminal"],
+                        "error": str(exc),
+                        "market_data": {
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "captured_at": datetime.now(timezone.utc).isoformat(),
+                            "timestamp_configuration": self.settings.broker_time.to_dict(),
+                            "candle_count": len(candles),
+                            "latest_candle_time": candles[-1].time.isoformat() if candles else None,
+                        },
+                        "message": "Analysis blocked; stale or inconsistent market data was not used.",
+                    }
+                    self.last_execution_result = result
+                    return result
                 analysis = TechnicalAnalyzer(minimum_history=50).analyze(symbol, timeframe, candles, closed_only=True)
                 decision = build_experimental_decision(analysis, tick, candles)
                 result = {
@@ -569,6 +620,7 @@ class DashboardService:
                     "terminal": identity["terminal"],
                     "analysis": analysis.to_dict(),
                     "decision": decision.to_dict(),
+                    "market_data": market_data.to_dict(),
                     "risk": adapter.risk_snapshot(),
                     "message": "Analysis-only path; no order capability was invoked.",
                 }

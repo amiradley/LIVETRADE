@@ -6,10 +6,12 @@ from live_trade.config import Settings
 from live_trade.dashboard import DashboardService
 from live_trade.execution import DemoAccountError, DemoOnlyExecutionAdapter, OrderValidationError, RiskLimitError
 from live_trade.mt5_client import ReadOnlyMt5Client
+from live_trade.market_validation import MarketDataValidationError, validate_decision_market_data
 from live_trade.storage import MarketDataStore
 from live_trade.trade_decision import build_experimental_decision
 from live_trade.models import Candle, Tick
 from live_trade.technical import TechnicalAnalyzer
+from live_trade.timestamping import BrokerTimeConfig
 
 
 class ExecutionApi:
@@ -18,6 +20,7 @@ class ExecutionApi:
     ORDER_TYPE_BUY = 0
     ORDER_TYPE_SELL = 1
     ORDER_TIME_GTC = 0
+    ORDER_FILLING_FOK = 0
     ORDER_FILLING_IOC = 1
 
     def __init__(self, *, demo=True, terminal_allowed=True):
@@ -25,6 +28,8 @@ class ExecutionApi:
         self.terminal_allowed = terminal_allowed
         self.order_send_calls = 0
         self.positions = []
+        self.candle_base = None
+        self.last_request = None
 
     def initialize(self, **kwargs):
         return True
@@ -58,6 +63,7 @@ class ExecutionApi:
             "volume_min": 0.01,
             "volume_max": 100.0,
             "volume_step": 0.01,
+            "filling_mode": 1,
         }
 
     def symbol_info_tick(self, symbol):
@@ -74,6 +80,7 @@ class ExecutionApi:
 
     def order_send(self, request):
         self.order_send_calls += 1
+        self.last_request = dict(request)
         self.positions = [{
             "ticket": 456,
             "symbol": request["symbol"],
@@ -88,7 +95,7 @@ class ExecutionApi:
         return (0, "ok")
 
     def copy_rates_from_pos(self, symbol, timeframe, start, count):
-        base = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
+        base = self.candle_base or (int(datetime.now(timezone.utc).timestamp()) - (count - 1) * 60)
         return [
             {
                 "time": base + index * 60,
@@ -152,6 +159,8 @@ def test_duplicate_signal_is_rejected_after_broker_confirmation(tmp_path):
     result = adapter.submit(decision_payload())
     assert result["status"] == "POSITION_OPEN"
     assert result["position"]["sl"] == 1.0992
+    assert api.last_request["comment"] == "LT-DEMO"
+    assert api.last_request["type_filling"] == api.ORDER_FILLING_FOK
     with pytest.raises(OrderValidationError, match="Duplicate signal"):
         adapter.submit(decision_payload())
     assert api.order_send_calls == 1
@@ -174,7 +183,10 @@ def test_decision_schema_returns_no_trade_for_insufficient_history():
 
 def test_dashboard_demo_start_reports_permission_block_without_order(tmp_path):
     api = ExecutionApi(terminal_allowed=False)
-    settings = Settings(tmp_path, None, tmp_path / "dashboard.sqlite3", tmp_path / "dashboard.jsonl", ("EURUSD",))
+    settings = Settings(
+        tmp_path, None, tmp_path / "dashboard.sqlite3", tmp_path / "dashboard.jsonl", ("EURUSD",),
+        broker_time=BrokerTimeConfig.with_offset(0),
+    )
     service = DashboardService(settings, client=ReadOnlyMt5Client(api=api))
 
     result = service.start_demo_execution()
@@ -189,7 +201,10 @@ def test_dashboard_demo_start_reports_permission_block_without_order(tmp_path):
 
 def test_dashboard_analysis_only_path_never_checks_or_submits_orders(tmp_path):
     api = ExecutionApi(terminal_allowed=False)
-    settings = Settings(tmp_path, None, tmp_path / "dashboard.sqlite3", tmp_path / "dashboard.jsonl", ("EURUSD",))
+    settings = Settings(
+        tmp_path, None, tmp_path / "dashboard.sqlite3", tmp_path / "dashboard.jsonl", ("EURUSD",),
+        broker_time=BrokerTimeConfig.with_offset(0),
+    )
     service = DashboardService(settings, client=ReadOnlyMt5Client(api=api))
 
     result = service.analyze_demo_execution()
@@ -198,3 +213,54 @@ def test_dashboard_analysis_only_path_never_checks_or_submits_orders(tmp_path):
     assert result["execution_enabled"] is False
     assert result["decision"]["decision"] in {"BUY", "SELL", "NO_TRADE"}
     assert api.order_send_calls == 0
+
+
+def test_demo_analysis_blocks_stale_broker_candles_before_decision(tmp_path):
+    api = ExecutionApi()
+    api.candle_base = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
+    settings = Settings(
+        tmp_path,
+        None,
+        tmp_path / "dashboard.sqlite3",
+        tmp_path / "dashboard.jsonl",
+        ("EURUSD",),
+        broker_time=BrokerTimeConfig.metaquotes_demo_default(),
+    )
+    service = DashboardService(settings, client=ReadOnlyMt5Client(api=api, broker_time=settings.broker_time))
+
+    result = service.analyze_demo_execution()
+
+    assert result["status"] == "BLOCKED"
+    assert result["stage"] == "DATA_QUALITY"
+    assert "stale" in result["error"]
+    assert result["execution_enabled"] is False
+    assert api.order_send_calls == 0
+
+
+def test_market_data_validation_applies_broker_offset_and_uses_closed_source_candle():
+    broker_time = BrokerTimeConfig.with_offset(2)
+    captured = datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc)
+    candles = tuple(
+        Candle("EURUSD", "M1", datetime(2026, 1, 1, 2, minute=index, tzinfo=timezone.utc), 1.1, 1.101, 1.099, 1.1005, 10)
+        for index in (0, 1, 2)
+    )
+    tick = Tick("EURUSD", datetime(2026, 1, 1, 2, 2, tzinfo=timezone.utc), 1.1, 1.1002, 1.1, 10)
+
+    evidence = validate_decision_market_data("EURUSD", "M1", tick, candles, broker_time, captured)
+
+    assert evidence.tick_effective_time == datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc)
+    assert evidence.source_candle_effective_time == datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+    assert evidence.source_candle_age_seconds == 60
+
+
+def test_market_data_validation_rejects_future_candles():
+    broker_time = BrokerTimeConfig.with_offset(0)
+    captured = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    candles = tuple(
+        Candle("EURUSD", "M1", datetime(2026, 1, 1, minute=index, tzinfo=timezone.utc), 1.1, 1.101, 1.099, 1.1005, 10)
+        for index in (0, 1, 2)
+    )
+    tick = Tick("EURUSD", captured, 1.1, 1.1002, 1.1, 10)
+
+    with pytest.raises(MarketDataValidationError, match="future"):
+        validate_decision_market_data("EURUSD", "M1", tick, candles, broker_time, captured)
