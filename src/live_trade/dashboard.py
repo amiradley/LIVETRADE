@@ -651,7 +651,32 @@ class DashboardService:
 
     def execution_status(self) -> dict[str, Any]:
         with self.lock:
-            return self.last_execution_result or {
+            if self.last_execution_result is not None:
+                return self.last_execution_result
+            persisted = self.store.execution_orders(limit=1)
+            if persisted:
+                latest = persisted[0]
+                status = str(latest.get("status") or "RECORDED")
+                stage = "POSITION_OPEN" if status == "POSITION_OPEN" else "RECORDED"
+                return {
+                    "mode": SessionMode.DEMO_EXECUTION.value,
+                    "status": status,
+                    "stage": stage,
+                    "execution_enabled": status == "POSITION_OPEN",
+                    "execution": {
+                        "status": status,
+                        "signal_id": latest.get("signal_id"),
+                        "symbol": latest.get("symbol"),
+                        "direction": latest.get("direction"),
+                        "volume": latest.get("volume"),
+                        "risk_amount": latest.get("risk_amount"),
+                        "order_ticket": latest.get("order_ticket"),
+                        "position_ticket": latest.get("position_ticket"),
+                        "updated_at": latest.get("updated_at"),
+                    },
+                    "message": "Persisted execution state restored from SQLite.",
+                }
+            return {
                 "mode": SessionMode.DEMO_EXECUTION.value,
                 "status": "STOPPED",
                 "stage": "IDLE",
