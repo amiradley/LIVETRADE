@@ -83,3 +83,12 @@ def test_exchange_rate_failure_is_explicit_and_client_history_is_read_only(tmp_p
     client.connect()
     assert len(client.history_deals(datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 2, tzinfo=timezone.utc))) == 1
     assert not hasattr(client, "order_send")
+
+
+def test_position_scoped_history_is_read_only(fake_mt5):
+    fake_mt5.history_deals_get = lambda **kwargs: ({"ticket": 7, "position_id": kwargs["position"], "symbol": "EURUSD"},)
+    client = ReadOnlyMt5Client(api=fake_mt5)
+    client.connect()
+
+    assert client.history_deals_for_position(99)[0]["position_id"] == 99
+    assert not hasattr(client, "order_send")

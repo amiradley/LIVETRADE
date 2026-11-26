@@ -114,7 +114,26 @@ class FinancialIntelligenceService:
         captured_at = (captured_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
         history_error = None
         try:
-            raw_deals = client.history_deals(captured_at - timedelta(days=self.lookback_days), captured_at)
+            raw_deals = list(client.history_deals(captured_at - timedelta(days=self.lookback_days), captured_at))
+            position_tickets = {
+                int(row["position_ticket"])
+                for row in self.store.execution_orders()
+                if row.get("position_ticket") is not None
+            }
+            for position_ticket in position_tickets:
+                try:
+                    raw_deals.extend(client.history_deals_for_position(position_ticket))
+                except Exception:
+                    continue
+            unique: dict[int, Mapping[str, Any]] = {}
+            without_ticket: list[Mapping[str, Any]] = []
+            for deal in raw_deals:
+                ticket = deal.get("ticket")
+                if ticket is None:
+                    without_ticket.append(deal)
+                else:
+                    unique[int(ticket)] = deal
+            raw_deals = list(unique.values()) + without_ticket
             self.store.save_broker_deals(raw_deals, captured_at)
             history_status = "BROKER_VERIFIED"
         except Exception as exc:

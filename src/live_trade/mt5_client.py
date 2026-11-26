@@ -180,6 +180,15 @@ class ReadOnlyMt5Client:
             raise Mt5Error(f"MT5 history_deals_get failed: {error}")
         return tuple(_record_to_dict(value) for value in values)
 
+    def history_deals_for_position(self, position_ticket: int) -> tuple[dict[str, Any], ...]:
+        """Return broker deals for one position using MT5's position filter."""
+        self._require_connection()
+        values = self.api.history_deals_get(position=int(position_ticket))
+        if values is None:
+            error = _record_to_dict(self.api.last_error())
+            raise Mt5Error(f"MT5 position deal history failed: {error}")
+        return tuple(_record_to_dict(value) for value in values)
+
     def get_tick(self, symbol: str) -> Tick:
         self._require_connection()
         value = self.api.symbol_info_tick(symbol)

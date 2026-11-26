@@ -166,6 +166,29 @@ def test_duplicate_signal_is_rejected_after_broker_confirmation(tmp_path):
     assert api.order_send_calls == 1
 
 
+def test_reconcile_closed_deal_is_position_scoped_and_idempotent(tmp_path):
+    api = ExecutionApi()
+    adapter = DemoOnlyExecutionAdapter(api, MarketDataStore(tmp_path / "execution.sqlite3"))
+    adapter.submit(decision_payload("signal-close-test"))
+
+    def history_deals_get(*args, **kwargs):
+        assert kwargs.get("position") == 456
+        return (
+            {"ticket": 1, "position_id": 456, "entry": 0, "profit": 0.0, "commission": 0.0, "swap": 0.0, "fee": 0.0},
+            {"ticket": 2, "position_id": 456, "entry": 1, "profit": 4.62, "commission": 0.0, "swap": 0.0, "fee": 0.0},
+        )
+
+    api.history_deals_get = history_deals_get
+    api.positions = []
+    adapter.reconcile_closed_deals()
+    adapter.reconcile_closed_deals()
+
+    row = adapter.store.execution_order("signal-close-test")
+    assert row["status"] == "CLOSED"
+    assert row["realized_pnl"] == 4.62
+    assert len(adapter.store.execution_orders()) == 1
+
+
 def test_decision_schema_returns_no_trade_for_insufficient_history():
     candles = tuple(
         Candle("EURUSD", "M1", datetime(2026, 1, 1, tzinfo=timezone.utc).replace(minute=index), 1.1, 1.101, 1.099, 1.1005, 10)

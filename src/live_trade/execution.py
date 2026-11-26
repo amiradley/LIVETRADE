@@ -133,26 +133,34 @@ class DemoOnlyExecutionAdapter:
         if getter is None:
             return
         end = datetime.now(timezone.utc)
-        try:
-            values = getter(end - timedelta(days=365), end) or ()
-        except Exception:
-            return
-        totals: dict[int, float] = {}
-        for value in values:
-            deal = _record_to_dict(value)
-            ticket = deal.get("order") or deal.get("position_id")
-            if ticket is None:
-                continue
-            net = sum(float(deal.get(field) or 0.0) for field in ("profit", "commission", "swap", "fee"))
-            totals[int(ticket)] = totals.get(int(ticket), 0.0) + net
+        open_positions = self._positions()
+        open_position_tickets = {int(item.get("ticket")) for item in open_positions if item.get("ticket") is not None}
         for row in self.store.execution_orders():
-            ticket = row.get("order_ticket") or row.get("position_ticket")
-            if ticket is not None and int(ticket) in totals:
-                self.store.update_execution_order(
-                    row["signal_id"],
-                    realized_pnl=totals[int(ticket)],
-                    status="CLOSED",
-                )
+            position_ticket = row.get("position_ticket") or row.get("order_ticket")
+            if position_ticket is None or int(position_ticket) in open_position_tickets:
+                continue
+            try:
+                values = getter(position=int(position_ticket)) or ()
+            except (TypeError, Exception):
+                try:
+                    values = getter(end - timedelta(days=365), end) or ()
+                except Exception:
+                    continue
+            matching: list[dict[str, Any]] = []
+            for value in values:
+                deal = _record_to_dict(value)
+                if int(deal.get("position_id") or 0) == int(position_ticket):
+                    matching.append(deal)
+            closing = [deal for deal in matching if int(deal.get("entry") or 0) in {1, 2, 3}]
+            if not closing:
+                continue
+            total = sum(
+                sum(float(deal.get(field) or 0.0) for field in ("profit", "commission", "swap", "fee"))
+                for deal in matching
+            )
+            if row.get("status") == "CLOSED" and row.get("realized_pnl") is not None and abs(float(row["realized_pnl"]) - total) <= 1e-9:
+                continue
+            self.store.update_execution_order(row["signal_id"], realized_pnl=total, status="CLOSED")
 
     def _symbol_info(self, symbol: str) -> dict[str, Any]:
         value = self.api.symbol_info(symbol)
