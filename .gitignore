@@ -8,9 +8,14 @@ src/*.egg-info/
 
 data/*
 !data/.gitkeep
+data/backups/
 logs/*
 !logs/.gitkeep
 
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
+
+# Machine-specific launchers and captured dashboard/account views stay local.
+*.lnk
+diagnostics/stage16-screenshots/
