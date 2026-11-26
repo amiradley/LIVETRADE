@@ -233,10 +233,11 @@ class DashboardService:
         self.last_error: str | None = None
         self.last_execution_result: dict[str, Any] | None = None
         self.demo_entries_enabled = False
+        self.last_entry_risk_gate: dict[str, Any] | None = None
         self.demo_monitor = DemoMonitoringWorker(self._run_demo_monitor_cycle)
 
     def _execution_controls(self) -> dict[str, Any]:
-        risk_gate = DemoOnlyExecutionAdapter(
+        risk_gate = self.last_entry_risk_gate or DemoOnlyExecutionAdapter(
             self.client.api, self.store, broker_offset_seconds=self.settings.broker_time.utc_offset_seconds or 0.0
         ).entry_risk_gate()
         return {
@@ -246,10 +247,60 @@ class DashboardService:
             "risk_gate": risk_gate,
         }
 
+    @staticmethod
+    def _operational_log(event: str, **details: Any) -> None:
+        LOGGER.info("Operational event: %s", event, extra={"operational_event": {"event": event, **details}})
+
+    def _reconcile_execution_state(self) -> dict[str, Any]:
+        """Refresh broker-confirmed execution lifecycle state without sending orders."""
+        with self.client_lock:
+            try:
+                self.client.connect()
+                adapter = DemoOnlyExecutionAdapter(
+                    self.client.api, self.store, broker_offset_seconds=self.settings.broker_time.utc_offset_seconds or 0.0
+                )
+                snapshot = adapter.risk_snapshot()
+                result = {
+                    "status": "RECONCILED",
+                    "broker_open_positions": snapshot["broker_open_positions"],
+                    "pending_orders": snapshot["pending_orders"],
+                }
+                self._operational_log("execution_reconciliation", **result)
+                return result
+            except Exception as exc:
+                result = {"status": "UNAVAILABLE", "error": str(exc)}
+                self._operational_log("execution_reconciliation", **result)
+                return result
+            finally:
+                self.client.disconnect()
+
     def _run_demo_monitor_cycle(self) -> dict[str, Any]:
         if self.demo_entries_enabled:
-            return self.start_demo_execution()
+            result = self.start_demo_execution()
+            execution = result.get("execution") or {}
+            self._operational_log(
+                "monitor_cycle",
+                status=result.get("status"),
+                decision=(result.get("decision") or {}).get("decision"),
+                risk_gate=(result.get("risk_gate") or {}).get("status"),
+                execution=execution.get("status"),
+                error=execution.get("error") or result.get("error"),
+                signal_id=(result.get("decision") or {}).get("signal_id"),
+                order_ticket=execution.get("order_ticket"),
+                position_ticket=execution.get("position_ticket"),
+            )
+            return result
         result = self.analyze_demo_execution()
+        execution = result.get("execution") or {}
+        self._operational_log(
+            "monitor_cycle",
+            status=result.get("status"),
+            decision=(result.get("decision") or {}).get("decision"),
+            risk_gate=(result.get("risk_gate") or {}).get("status"),
+            execution=execution.get("status"),
+            error=execution.get("error") or result.get("error"),
+            signal_id=(result.get("decision") or {}).get("signal_id"),
+        )
         controls = self._execution_controls()
         if "risk_gate" in result:
             controls["risk_gate"] = result["risk_gate"]
@@ -262,6 +313,7 @@ class DashboardService:
     def start_monitoring(self) -> dict[str, Any]:
         with self.lock:
             health = self.demo_monitor.start()
+            self._operational_log("monitoring", status="STARTED", cycles=health.cycles)
             return {
                 "mode": SessionMode.DEMO_EXECUTION.value,
                 "status": "MONITORING",
@@ -273,35 +325,97 @@ class DashboardService:
 
     def stop_monitoring(self) -> dict[str, Any]:
         health = self.demo_monitor.stop()
+        reconciliation = self._reconcile_execution_state()
         with self.lock:
             self.demo_entries_enabled = False
+            self.last_entry_risk_gate = None
+            self._operational_log("monitoring", status="STOPPED", cycles=health.cycles)
             return {
                 "mode": SessionMode.DEMO_EXECUTION.value,
                 "status": "STOPPED",
                 "execution_enabled": False,
                 "message": "Persistent DEMO monitoring stopped and new entries remain blocked.",
+                "reconciliation": reconciliation,
                 **self._execution_controls(),
                 "monitoring": health.to_dict(),
             }
 
     def enable_demo_entries(self) -> dict[str, Any]:
-        with self.lock:
+        with self.lock, self.client_lock:
             self.demo_entries_enabled = False
-            risk_gate = DemoOnlyExecutionAdapter(
-                self.client.api, self.store, broker_offset_seconds=self.settings.broker_time.utc_offset_seconds or 0.0
-            ).entry_risk_gate()
-            return {
-                "mode": SessionMode.DEMO_EXECUTION.value,
-                "status": "BLOCKED",
-                "stage": "RISK_GATE",
-                "execution_enabled": False,
-                "error": risk_gate["message"],
-                **self._execution_controls(),
-            }
+            self.client.connect()
+            try:
+                adapter = DemoOnlyExecutionAdapter(
+                    self.client.api, self.store, broker_offset_seconds=self.settings.broker_time.utc_offset_seconds or 0.0
+                )
+                identity = adapter.verify_demo_identity()
+                adapter.verify_execution_permissions()
+                risk_gate = adapter.entry_risk_gate(identity["account"])
+                risk = adapter.risk_snapshot()
+                symbol = self.settings.symbols[0] if self.settings.symbols else "EURUSD"
+                tick = self.client.get_tick(symbol)
+                candles = self.client.get_candles(symbol, "M1", 100)
+                validate_decision_market_data(symbol, "M1", tick, candles, self.settings.broker_time)
+                if not risk_gate["entries_allowed"]:
+                    return {
+                        "mode": SessionMode.DEMO_EXECUTION.value,
+                        "status": "BLOCKED",
+                        "stage": "RISK_GATE",
+                        "execution_enabled": False,
+                        "account": identity["account"],
+                        "terminal": identity["terminal"],
+                        "risk_gate": risk_gate,
+                        "error": risk_gate["message"],
+                        **self._execution_controls(),
+                    }
+                if risk["broker_open_positions"] or risk["pending_orders"]:
+                    return {
+                        "mode": SessionMode.DEMO_EXECUTION.value,
+                        "status": "BLOCKED",
+                        "stage": "POSITION_GUARD",
+                        "execution_enabled": False,
+                        "risk": risk,
+                        "error": "Entry activation requires zero existing positions and pending orders.",
+                        **self._execution_controls(),
+                    }
+                self.demo_entries_enabled = True
+                risk_gate = {**risk_gate, "message": "Risk limits pass; autonomous DEMO entry activation is enabled."}
+                self.last_entry_risk_gate = risk_gate
+                self._operational_log("entry_activation", status="ENABLED", risk_gate=risk_gate.get("status"))
+                controls = self._execution_controls()
+                controls["risk_gate"] = risk_gate
+                return {
+                    "mode": SessionMode.DEMO_EXECUTION.value,
+                    "status": "ENABLED",
+                    "stage": "AUTHORIZATION",
+                    "execution_enabled": True,
+                    "message": "Autonomous DEMO entries enabled after live preflight; emergency STOP remains available.",
+                    "account": identity["account"],
+                    "terminal": identity["terminal"],
+                    "risk": risk,
+                    "risk_gate": risk_gate,
+                    **controls,
+                }
+            except (ExecutionError, MarketDataValidationError) as exc:
+                self.demo_entries_enabled = False
+                self.last_entry_risk_gate = None
+                self._operational_log("entry_activation", status="BLOCKED", error=str(exc))
+                return {
+                    "mode": SessionMode.DEMO_EXECUTION.value,
+                    "status": "BLOCKED",
+                    "stage": "PREFLIGHT",
+                    "execution_enabled": False,
+                    "error": str(exc),
+                    **self._execution_controls(),
+                }
+            finally:
+                self.client.disconnect()
 
     def disable_demo_entries(self) -> dict[str, Any]:
         with self.lock:
             self.demo_entries_enabled = False
+            self.last_entry_risk_gate = None
+            self._operational_log("entry_activation", status="DISABLED")
             return {
                 "mode": SessionMode.DEMO_EXECUTION.value,
                 "status": "STOPPED",
@@ -607,7 +721,7 @@ class DashboardService:
                     }
                     self.last_execution_result = result
                     return result
-                risk_gate = adapter.entry_risk_gate()
+                risk_gate = adapter.entry_risk_gate(identity["account"])
                 if not risk_gate["entries_allowed"]:
                     result = {
                         "mode": SessionMode.DEMO_EXECUTION.value,
@@ -746,7 +860,9 @@ class DashboardService:
     def stop_demo_execution(self) -> dict[str, Any]:
         with self.lock:
             self.demo_entries_enabled = False
+            self.last_entry_risk_gate = None
         health = self.demo_monitor.stop()
+        reconciliation = self._reconcile_execution_state()
         with self.lock, self.client_lock:
             self.client.connect()
             try:
@@ -762,10 +878,12 @@ class DashboardService:
                 "new_entries_blocked": True,
                 "positions": list(positions),
                 "message": "New demo entries are blocked; existing positions were not closed.",
+                "reconciliation": reconciliation,
                 **self._execution_controls(),
                 "monitoring": health.to_dict(),
             }
             self.last_execution_result = result
+            self._operational_log("emergency_stop", status=status, positions=len(positions))
             return result
 
     def execution_status(self) -> dict[str, Any]:

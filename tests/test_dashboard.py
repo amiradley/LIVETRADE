@@ -1,8 +1,11 @@
 import threading
+from datetime import date, datetime, timezone
 
 from live_trade.config import Settings
 from live_trade.dashboard import DashboardServer, DashboardService
+from live_trade.intelligence import ExchangeRate
 from live_trade.session import SessionError, SessionState
+from live_trade.timestamping import BrokerTimeConfig
 
 
 def dashboard_settings(tmp_path):
@@ -158,3 +161,34 @@ def test_dashboard_monitoring_lifecycle_is_single_instance_and_entries_stay_bloc
     stopped = service.stop_monitoring()
     assert stopped["status"] == "STOPPED"
     assert stopped["monitoring"]["thread_alive"] is False
+    assert stopped["reconciliation"]["status"] == "RECONCILED"
+
+
+def test_dashboard_entry_activation_requires_live_preflight_and_can_be_stopped(tmp_path, fake_mt5):
+    from live_trade.mt5_client import ReadOnlyMt5Client
+    from test_execution import ExecutionApi
+
+    settings = Settings(
+        base_dir=tmp_path,
+        mt5_path=None,
+        db_path=tmp_path / "dashboard.sqlite3",
+        log_path=tmp_path / "dashboard.jsonl",
+        symbols=("EURUSD",),
+        broker_time=BrokerTimeConfig.with_offset(0),
+    )
+    api = ExecutionApi()
+    service = DashboardService(settings, client=ReadOnlyMt5Client(api=api))
+    service.store.save_exchange_rate(
+        ExchangeRate("USD", "MYR", 4.0, "test-recorded-rate", datetime.now(timezone.utc), date.today(), "OK")
+    )
+
+    enabled = service.enable_demo_entries()
+    assert enabled["status"] == "ENABLED"
+    assert enabled["execution_enabled"] is True
+    assert enabled["risk_gate"]["entries_allowed"] is True
+    assert service.demo_entries_enabled is True
+
+    stopped = service.disable_demo_entries()
+    assert stopped["status"] == "STOPPED"
+    assert service.demo_entries_enabled is False
+    assert api.order_send_calls == 0

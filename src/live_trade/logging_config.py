@@ -16,6 +16,9 @@ class JsonFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
+        operational = getattr(record, "operational_event", None)
+        if operational is not None:
+            payload["operational_event"] = operational
         return json.dumps(payload, ensure_ascii=True)
 
 
