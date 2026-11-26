@@ -102,6 +102,19 @@ The guarded DEMO execution pathway is separate from DEMO_SHADOW. It uses DemoOnl
 
 The research intelligence layer provides reproducible hypothesis records, bounded OHLC backtests with explicit spread/slippage assumptions, train/out-of-sample separation, validation outcomes, evidence records, and persistent learning observations. It is deliberately conservative: small samples produce inconclusive results, rejected hypotheses remain stored, and no research status grants execution approval.
 
+### DEMO risk limits and monitoring
+
+The approved DEMO loss limits are persisted in SQLite and remain separate from manual entry activation:
+
+- Daily realised loss: RM4.88.
+- Weekly realised loss: RM9.77.
+- Maximum cumulative drawdown: RM19.54.
+- Reset timezone: Malaysia time, `Asia/Kuala_Lumpur` (UTC+8, no daylight-saving changes).
+
+At configuration time these RM limits are converted to USD using the recorded USD/MYR exchange-rate row. The current verified reference is `1 USD = 4.1195 MYR`, giving USD limits of approximately `$1.18461`, `$2.37165`, and `$4.74329`. Daily and weekly checks use net closing-deal P&L. Drawdown uses persisted peak account equity minus current equity, so realised and floating P&L are not double-counted. Missing, stale, or invalid rate/account data blocks new entries. Existing positions remain under their broker-confirmed protective SL/TP policy.
+
+The monitoring worker is single-instance, restartable, and exposes cycle/error state through `/api/monitoring`. New DEMO entries remain disabled until a separate explicit activation and all safety gates pass; monitoring and analysis do not submit orders.
+
 ## Tests
 
 ```powershell

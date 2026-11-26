@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -181,6 +181,35 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
     retrieved_at TEXT NOT NULL,
     status TEXT NOT NULL,
     UNIQUE(base_currency, quote_currency, retrieved_at)
+);
+CREATE TABLE IF NOT EXISTS risk_configuration (
+    configuration_id INTEGER PRIMARY KEY CHECK (configuration_id = 1),
+    daily_loss_limit_myr REAL NOT NULL,
+    weekly_loss_limit_myr REAL NOT NULL,
+    max_drawdown_myr REAL NOT NULL,
+    timezone_name TEXT NOT NULL,
+    account_currency TEXT NOT NULL,
+    quote_currency TEXT NOT NULL,
+    usd_to_myr REAL,
+    exchange_rate_source TEXT,
+    exchange_rate_retrieved_at TEXT,
+    exchange_rate_status TEXT NOT NULL,
+    approved_at TEXT,
+    active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS risk_state (
+    state_id INTEGER PRIMARY KEY CHECK (state_id = 1),
+    baseline_equity_usd REAL,
+    peak_equity_usd REAL,
+    captured_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS risk_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    limit_name TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    triggered_at TEXT NOT NULL,
+    calculation_json TEXT NOT NULL,
+    UNIQUE(limit_name, period_start)
 );
 CREATE TABLE IF NOT EXISTS savings_allocations (
     allocation_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -899,6 +928,98 @@ class MarketDataStore:
                 ),
             )
             return int(cursor.lastrowid) if cursor.lastrowid else None
+
+    def latest_exchange_rate(self, base_currency: str, quote_currency: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM exchange_rates WHERE base_currency=? AND quote_currency=? "
+                "ORDER BY retrieved_at DESC LIMIT 1",
+                (base_currency.upper(), quote_currency.upper()),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def save_risk_configuration(self, configuration: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO risk_configuration "
+                "(configuration_id,daily_loss_limit_myr,weekly_loss_limit_myr,max_drawdown_myr,timezone_name,"
+                "account_currency,quote_currency,usd_to_myr,exchange_rate_source,exchange_rate_retrieved_at,"
+                "exchange_rate_status,approved_at,active) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(configuration_id) DO UPDATE SET daily_loss_limit_myr=excluded.daily_loss_limit_myr,"
+                "weekly_loss_limit_myr=excluded.weekly_loss_limit_myr,max_drawdown_myr=excluded.max_drawdown_myr,"
+                "timezone_name=excluded.timezone_name,account_currency=excluded.account_currency,"
+                "quote_currency=excluded.quote_currency,usd_to_myr=excluded.usd_to_myr,"
+                "exchange_rate_source=excluded.exchange_rate_source,"
+                "exchange_rate_retrieved_at=excluded.exchange_rate_retrieved_at,"
+                "exchange_rate_status=excluded.exchange_rate_status,approved_at=excluded.approved_at,"
+                "active=excluded.active",
+                (
+                    configuration["daily_loss_limit_myr"], configuration["weekly_loss_limit_myr"],
+                    configuration["max_drawdown_myr"], configuration["timezone"], configuration["account_currency"],
+                    configuration["quote_currency"], configuration.get("usd_to_myr"),
+                    configuration.get("exchange_rate_source"), configuration.get("exchange_rate_retrieved_at"),
+                    configuration.get("exchange_rate_status", "UNAVAILABLE"), configuration.get("approved_at"),
+                    int(bool(configuration.get("active", True))),
+                ),
+            )
+
+    def risk_configuration(self) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute("SELECT * FROM risk_configuration WHERE configuration_id=1").fetchone()
+            return dict(row) if row else None
+
+    def save_risk_state(self, state: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO risk_state (state_id,baseline_equity_usd,peak_equity_usd,captured_at) VALUES (1,?,?,?) "
+                "ON CONFLICT(state_id) DO UPDATE SET baseline_equity_usd=excluded.baseline_equity_usd,"
+                "peak_equity_usd=excluded.peak_equity_usd,captured_at=excluded.captured_at",
+                (state.get("baseline_equity_usd"), state.get("peak_equity_usd"), state["captured_at"]),
+            )
+
+    def risk_state(self) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute("SELECT * FROM risk_state WHERE state_id=1").fetchone()
+            return dict(row) if row else None
+
+    def realized_pnl_between(self, start: Any, end: Any, broker_offset_seconds: float = 0.0) -> tuple[float, int]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT entry_type,deal_time,profit,commission,swap,fee FROM broker_deals "
+                "WHERE entry_type IN (1,2,3) AND deal_time IS NOT NULL"
+            ).fetchall()
+            start_utc = start.astimezone(timezone.utc)
+            end_utc = end.astimezone(timezone.utc)
+            offset = timedelta(seconds=float(broker_offset_seconds))
+            total = 0.0
+            count = 0
+            for row in rows:
+                try:
+                    effective_time = datetime.fromisoformat(str(row[1])).astimezone(timezone.utc) - offset
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if start_utc <= effective_time <= end_utc:
+                    total += sum(float(row[index] or 0.0) for index in (2, 3, 4, 5))
+                    count += 1
+            return total, count
+
+    def save_risk_event(self, event: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO risk_events (limit_name,period_start,triggered_at,calculation_json) VALUES (?,?,?,?)",
+                (event["limit_name"], event["period_start"], event["triggered_at"], json.dumps(event, default=str)),
+            )
+
+    def risk_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT * FROM risk_events ORDER BY triggered_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def apply_savings_allocation(
         self, cumulative_net_profit: float, source_deal_count: int, calculated_at: Any

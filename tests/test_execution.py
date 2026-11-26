@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
 from live_trade.config import Settings
 from live_trade.dashboard import DashboardService
 from live_trade.execution import DemoAccountError, DemoOnlyExecutionAdapter, OrderValidationError, RiskLimitError
+from live_trade.intelligence import ExchangeRate
 from live_trade.mt5_client import ReadOnlyMt5Client
 from live_trade.market_validation import MarketDataValidationError, validate_decision_market_data
 from live_trade.storage import MarketDataStore
@@ -123,6 +124,14 @@ def decision_payload(signal_id="signal-test"):
     }
 
 
+def configured_store(path):
+    store = MarketDataStore(path)
+    store.save_exchange_rate(
+        ExchangeRate("USD", "MYR", 4.0, "test-recorded-rate", datetime.now(timezone.utc), date.today(), "OK")
+    )
+    return store
+
+
 def test_demo_guard_rejects_non_demo_accounts(tmp_path):
     api = ExecutionApi(demo=False)
     adapter = DemoOnlyExecutionAdapter(api, MarketDataStore(tmp_path / "execution.sqlite3"))
@@ -133,7 +142,7 @@ def test_demo_guard_rejects_non_demo_accounts(tmp_path):
 
 def test_terminal_permission_blocks_before_order_submission(tmp_path):
     api = ExecutionApi(terminal_allowed=False)
-    adapter = DemoOnlyExecutionAdapter(api, MarketDataStore(tmp_path / "execution.sqlite3"))
+    adapter = DemoOnlyExecutionAdapter(api, configured_store(tmp_path / "execution.sqlite3"))
 
     with pytest.raises(Exception, match="automated trading permission"):
         adapter.submit(decision_payload())
@@ -142,7 +151,7 @@ def test_terminal_permission_blocks_before_order_submission(tmp_path):
 
 def test_missing_stop_and_minimum_lot_are_rejected(tmp_path):
     api = ExecutionApi()
-    adapter = DemoOnlyExecutionAdapter(api, MarketDataStore(tmp_path / "execution.sqlite3"))
+    adapter = DemoOnlyExecutionAdapter(api, configured_store(tmp_path / "execution.sqlite3"))
 
     missing_stop = decision_payload("signal-missing-stop")
     missing_stop["stop_loss"] = None
@@ -154,7 +163,7 @@ def test_missing_stop_and_minimum_lot_are_rejected(tmp_path):
 
 def test_duplicate_signal_is_rejected_after_broker_confirmation(tmp_path):
     api = ExecutionApi()
-    adapter = DemoOnlyExecutionAdapter(api, MarketDataStore(tmp_path / "execution.sqlite3"))
+    adapter = DemoOnlyExecutionAdapter(api, configured_store(tmp_path / "execution.sqlite3"))
 
     result = adapter.submit(decision_payload())
     assert result["status"] == "POSITION_OPEN"
@@ -168,7 +177,7 @@ def test_duplicate_signal_is_rejected_after_broker_confirmation(tmp_path):
 
 def test_reconcile_closed_deal_is_position_scoped_and_idempotent(tmp_path):
     api = ExecutionApi()
-    adapter = DemoOnlyExecutionAdapter(api, MarketDataStore(tmp_path / "execution.sqlite3"))
+    adapter = DemoOnlyExecutionAdapter(api, configured_store(tmp_path / "execution.sqlite3"))
     adapter.submit(decision_payload("signal-close-test"))
 
     def history_deals_get(*args, **kwargs):
@@ -187,6 +196,37 @@ def test_reconcile_closed_deal_is_position_scoped_and_idempotent(tmp_path):
     assert row["status"] == "CLOSED"
     assert row["realized_pnl"] == 4.62
     assert len(adapter.store.execution_orders()) == 1
+
+
+def test_restart_reconciles_uncertain_open_position_and_requires_both_protective_levels(tmp_path):
+    api = ExecutionApi()
+    store = configured_store(tmp_path / "execution.sqlite3")
+    store.save_execution_order({
+        "signal_id": "signal-restart-open", "status": "UNCERTAIN", "symbol": "EURUSD", "timeframe": "M1",
+        "direction": "BUY", "entry": 1.1002, "stop_loss": 1.0992, "take_profit": 1.1022,
+        "volume": 0.11, "risk_amount": 2.2, "order_ticket": 123, "position_ticket": 456,
+        "request_json": "{}", "result_json": "{}", "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    api.positions = [{"ticket": 456, "symbol": "EURUSD", "sl": 1.0992, "tp": 1.1022}]
+
+    DemoOnlyExecutionAdapter(api, store).reconcile_open_positions()
+
+    assert store.execution_order("signal-restart-open")["status"] == "POSITION_OPEN"
+
+    api.positions = []
+    original_send = api.order_send
+
+    def missing_tp(request):
+        result = original_send(request)
+        api.positions[0].pop("tp", None)
+        return result
+
+    api.order_send = missing_tp
+    adapter = DemoOnlyExecutionAdapter(api, store)
+    with pytest.raises(Exception, match="protective SL/TP"):
+        adapter.submit(decision_payload("signal-missing-tp"))
+    assert store.execution_order("signal-missing-tp")["status"] == "PROTECTION_UNVERIFIED"
 
 
 def test_decision_schema_returns_no_trade_for_insufficient_history():
@@ -211,14 +251,15 @@ def test_dashboard_demo_start_reports_permission_block_without_order(tmp_path):
         broker_time=BrokerTimeConfig.with_offset(0),
     )
     service = DashboardService(settings, client=ReadOnlyMt5Client(api=api))
+    service.demo_entries_enabled = True
 
     result = service.start_demo_execution()
 
     assert result["mode"] == "DEMO_EXECUTION"
     assert result["status"] == "BLOCKED"
-    assert result["stage"] == "PERMISSION_CHECK"
+    assert result["stage"] == "RISK_GATE"
     assert result["execution_enabled"] is False
-    assert result["decision"]["label"] == "EXPERIMENTAL — UNVALIDATED"
+    assert result["risk_gate"]["status"] == "BLOCKED"
     assert api.order_send_calls == 0
 
 

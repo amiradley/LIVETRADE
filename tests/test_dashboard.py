@@ -1,3 +1,5 @@
+import threading
+
 from live_trade.config import Settings
 from live_trade.dashboard import DashboardServer, DashboardService
 from live_trade.session import SessionError, SessionState
@@ -133,3 +135,26 @@ def test_dashboard_marks_running_session_error_after_mt5_failure(tmp_path, fake_
     assert stale["connection"]["status"] == "STALE"
     assert stale["session"]["state"] == SessionState.ERROR.value
     assert stale["session"]["message"] == "simulated MT5 disconnect"
+
+
+def test_dashboard_monitoring_lifecycle_is_single_instance_and_entries_stay_blocked(tmp_path, fake_mt5):
+    from live_trade.mt5_client import ReadOnlyMt5Client
+
+    service = DashboardService(dashboard_settings(tmp_path), client=ReadOnlyMt5Client(api=fake_mt5))
+    completed = threading.Event()
+    service.demo_monitor.cycle = lambda: (completed.set() or {"status": "READ_ONLY"})
+
+    gate = service.enable_demo_entries()
+    assert gate["status"] == "BLOCKED"
+    assert gate["risk_gate"]["reasons"] == ["risk_configuration_or_exchange_rate_unavailable"]
+
+    started = service.start_monitoring()
+    assert started["status"] == "MONITORING"
+    assert started["execution_enabled"] is False
+    assert completed.wait(2)
+
+    duplicate = service.start_monitoring()
+    assert duplicate["monitoring"]["thread_alive"] is True
+    stopped = service.stop_monitoring()
+    assert stopped["status"] == "STOPPED"
+    assert stopped["monitoring"]["thread_alive"] is False

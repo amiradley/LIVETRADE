@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from .mt5_client import _record_to_dict
+from .risk import PersistentRiskManager
 
 
 class ExecutionError(RuntimeError):
@@ -53,10 +54,17 @@ def _number(value: Any, label: str) -> float:
 class DemoOnlyExecutionAdapter:
     """Guarded MT5 order adapter. It rejects every non-demo or unsafe request."""
 
-    def __init__(self, api: Any, store: Any, budget: ExperimentalRiskBudget | None = None) -> None:
+    def __init__(
+        self,
+        api: Any,
+        store: Any,
+        budget: ExperimentalRiskBudget | None = None,
+        broker_offset_seconds: float = 0.0,
+    ) -> None:
         self.api = api
         self.store = store
         self.budget = budget or ExperimentalRiskBudget()
+        self.risk_manager = PersistentRiskManager(store, broker_offset_seconds)
 
     def _account(self) -> dict[str, Any]:
         return _record_to_dict(self.api.account_info())
@@ -108,6 +116,7 @@ class DemoOnlyExecutionAdapter:
         return tuple(_record_to_dict(item) for item in values)
 
     def risk_snapshot(self) -> dict[str, Any]:
+        self.reconcile_open_positions()
         self.reconcile_closed_deals()
         rows = self.store.execution_orders()
         realized_losses = sum(max(0.0, -float(row["realized_pnl"])) for row in rows if row.get("realized_pnl") is not None)
@@ -127,6 +136,41 @@ class DemoOnlyExecutionAdapter:
             "broker_open_positions": len(positions),
             "pending_orders": len(self._orders()),
         }
+
+    def reconcile_open_positions(self) -> None:
+        """Recover broker-confirmed open positions after an adapter restart."""
+        positions = self._positions()
+        by_ticket = {int(item["ticket"]): item for item in positions if item.get("ticket") is not None}
+        for row in self.store.execution_orders():
+            if row.get("status") not in {"PENDING", "UNCERTAIN", "PROTECTION_UNVERIFIED"}:
+                continue
+            ticket = row.get("position_ticket")
+            position = by_ticket.get(int(ticket)) if ticket is not None else None
+            if position is None:
+                candidates = [item for item in positions if str(item.get("symbol", "")).upper() == str(row.get("symbol", "")).upper()]
+                position = candidates[0] if len(candidates) == 1 else None
+            if position is None:
+                continue
+            sl = position.get("sl")
+            tp = position.get("tp")
+            status = "POSITION_OPEN" if sl is not None and tp is not None else "PROTECTION_UNVERIFIED"
+            self.store.update_execution_order(
+                row["signal_id"], status=status, position_ticket=position.get("ticket")
+            )
+
+    def entry_risk_gate(self, account: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Return persisted loss-limit controls; missing or stale data fails closed."""
+        assessment = self.risk_manager.assess(account)
+        result = {
+            **assessment.to_dict(),
+            "budget": self.budget.to_dict(),
+        }
+        result["message"] = (
+            "Risk limits pass; manual DEMO entry activation remains required."
+            if assessment.entries_allowed
+            else "New DEMO entries remain blocked by persisted risk controls."
+        )
+        return result
 
     def reconcile_closed_deals(self) -> None:
         getter = getattr(self.api, "history_deals_get", None)
@@ -227,6 +271,9 @@ class DemoOnlyExecutionAdapter:
 
     def submit(self, decision: Mapping[str, Any], max_spread_points: float = 30.0, deviation_points: int = 20) -> dict[str, Any]:
         identity = self.verify_demo_identity()
+        risk_gate = self.entry_risk_gate(identity["account"])
+        if not risk_gate["entries_allowed"]:
+            raise RiskLimitError(risk_gate["message"] + ": " + ", ".join(risk_gate["reasons"]))
         direction = str(decision.get("decision") or "NO_TRADE").upper()
         if direction == "NO_TRADE":
             return {"status": "NO_TRADE", "decision": dict(decision), "account": identity["account"]}
@@ -320,9 +367,15 @@ class DemoOnlyExecutionAdapter:
             raise ExecutionError("Broker accepted the order response but position reconciliation is unresolved")
         position = matching[0]
         broker_sl = position.get("sl")
-        if broker_sl is None or abs(float(broker_sl) - stop_loss) > point:
+        broker_tp = position.get("tp")
+        if (
+            broker_sl is None
+            or broker_tp is None
+            or abs(float(broker_sl) - stop_loss) > point
+            or abs(float(broker_tp) - take_profit) > point
+        ):
             self.store.update_execution_order(signal_id, status="PROTECTION_UNVERIFIED", order_ticket=order_ticket, position_ticket=position.get("ticket"), result_json=json.dumps(result_raw, default=str))
-            raise ExecutionError("Broker position does not confirm the requested protective stop-loss")
+            raise ExecutionError("Broker position does not confirm the requested protective SL/TP")
         self.store.update_execution_order(signal_id, status=status, order_ticket=order_ticket, position_ticket=position.get("ticket"), result_json=json.dumps(result_raw, default=str))
         return {
             "status": status,

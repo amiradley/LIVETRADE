@@ -21,6 +21,7 @@ from .historical import CollectionScheduler, HistoricalDataEngine
 from .intelligence import FinancialIntelligenceService, FinancialIntelligenceSnapshot
 from .market_validation import MarketDataValidationError, validate_decision_market_data
 from .mt5_client import ReadOnlyMt5Client
+from .monitoring import DemoMonitoringWorker
 from .research import ResearchWorker
 from .research_intelligence import ResearchService
 from .session import SessionError, SessionMode, SessionState, TradingSessionController
@@ -231,6 +232,84 @@ class DashboardService:
         self.last_successful: dict[str, Any] | None = None
         self.last_error: str | None = None
         self.last_execution_result: dict[str, Any] | None = None
+        self.demo_entries_enabled = False
+        self.demo_monitor = DemoMonitoringWorker(self._run_demo_monitor_cycle)
+
+    def _execution_controls(self) -> dict[str, Any]:
+        risk_gate = DemoOnlyExecutionAdapter(
+            self.client.api, self.store, broker_offset_seconds=self.settings.broker_time.utc_offset_seconds or 0.0
+        ).entry_risk_gate()
+        return {
+            "new_entries_enabled": self.demo_entries_enabled,
+            "new_entries_blocked": not self.demo_entries_enabled,
+            "monitoring": self.demo_monitor.health().to_dict(),
+            "risk_gate": risk_gate,
+        }
+
+    def _run_demo_monitor_cycle(self) -> dict[str, Any]:
+        if self.demo_entries_enabled:
+            return self.start_demo_execution()
+        result = self.analyze_demo_execution()
+        controls = self._execution_controls()
+        if "risk_gate" in result:
+            controls["risk_gate"] = result["risk_gate"]
+        return {**result, **controls}
+
+    def monitoring_status(self) -> dict[str, Any]:
+        with self.lock:
+            return {"mode": SessionMode.DEMO_EXECUTION.value, **self._execution_controls()}
+
+    def start_monitoring(self) -> dict[str, Any]:
+        with self.lock:
+            health = self.demo_monitor.start()
+            return {
+                "mode": SessionMode.DEMO_EXECUTION.value,
+                "status": "MONITORING",
+                "execution_enabled": self.demo_entries_enabled,
+                "message": "Persistent DEMO monitoring started; new entries remain blocked by risk gates.",
+                **self._execution_controls(),
+                "monitoring": health.to_dict(),
+            }
+
+    def stop_monitoring(self) -> dict[str, Any]:
+        health = self.demo_monitor.stop()
+        with self.lock:
+            self.demo_entries_enabled = False
+            return {
+                "mode": SessionMode.DEMO_EXECUTION.value,
+                "status": "STOPPED",
+                "execution_enabled": False,
+                "message": "Persistent DEMO monitoring stopped and new entries remain blocked.",
+                **self._execution_controls(),
+                "monitoring": health.to_dict(),
+            }
+
+    def enable_demo_entries(self) -> dict[str, Any]:
+        with self.lock:
+            self.demo_entries_enabled = False
+            risk_gate = DemoOnlyExecutionAdapter(
+                self.client.api, self.store, broker_offset_seconds=self.settings.broker_time.utc_offset_seconds or 0.0
+            ).entry_risk_gate()
+            return {
+                "mode": SessionMode.DEMO_EXECUTION.value,
+                "status": "BLOCKED",
+                "stage": "RISK_GATE",
+                "execution_enabled": False,
+                "error": risk_gate["message"],
+                **self._execution_controls(),
+            }
+
+    def disable_demo_entries(self) -> dict[str, Any]:
+        with self.lock:
+            self.demo_entries_enabled = False
+            return {
+                "mode": SessionMode.DEMO_EXECUTION.value,
+                "status": "STOPPED",
+                "stage": "ENTRY_STOP",
+                "execution_enabled": False,
+                "message": "New DEMO entries are blocked; position monitoring may continue.",
+                **self._execution_controls(),
+            }
 
     def _capture_live(self) -> dict[str, Any]:
         with self.client_lock:
@@ -498,11 +577,24 @@ class DashboardService:
 
     def start_demo_execution(self) -> dict[str, Any]:
         with self.lock, self.client_lock:
+            if not self.demo_entries_enabled:
+                result = {
+                    "mode": SessionMode.DEMO_EXECUTION.value,
+                    "status": "BLOCKED",
+                    "stage": "ENTRY_DISABLED",
+                    "execution_enabled": False,
+                    "error": "New DEMO entries are disabled by the risk gate.",
+                    **self._execution_controls(),
+                }
+                self.last_execution_result = result
+                return result
             symbol = self.settings.symbols[0] if self.settings.symbols else "EURUSD"
             timeframe = "M1"
             self.client.connect()
             try:
-                adapter = DemoOnlyExecutionAdapter(self.client.api, self.store)
+                adapter = DemoOnlyExecutionAdapter(
+                    self.client.api, self.store, broker_offset_seconds=self.settings.broker_time.utc_offset_seconds or 0.0
+                )
                 try:
                     identity = adapter.verify_demo_identity()
                 except ExecutionError as exc:
@@ -512,6 +604,20 @@ class DashboardService:
                         "stage": "DEMO_GUARD",
                         "execution_enabled": False,
                         "error": str(exc),
+                    }
+                    self.last_execution_result = result
+                    return result
+                risk_gate = adapter.entry_risk_gate()
+                if not risk_gate["entries_allowed"]:
+                    result = {
+                        "mode": SessionMode.DEMO_EXECUTION.value,
+                        "status": "BLOCKED",
+                        "stage": "RISK_GATE",
+                        "execution_enabled": False,
+                        "account": identity["account"],
+                        "terminal": identity["terminal"],
+                        "risk_gate": risk_gate,
+                        "error": risk_gate["message"],
                     }
                     self.last_execution_result = result
                     return result
@@ -554,6 +660,7 @@ class DashboardService:
                     "decision": decision.to_dict(),
                     "market_data": market_data.to_dict(),
                     "risk": adapter.risk_snapshot(),
+                    "risk_gate": adapter.entry_risk_gate(identity["account"]),
                 }
                 try:
                     adapter.verify_execution_permissions()
@@ -582,7 +689,9 @@ class DashboardService:
             timeframe = "M1"
             self.client.connect()
             try:
-                adapter = DemoOnlyExecutionAdapter(self.client.api, self.store)
+                adapter = DemoOnlyExecutionAdapter(
+                    self.client.api, self.store, broker_offset_seconds=self.settings.broker_time.utc_offset_seconds or 0.0
+                )
                 identity = adapter.verify_demo_identity()
                 tick = self.client.get_tick(symbol)
                 candles = self.client.get_candles(symbol, timeframe, 100)
@@ -626,6 +735,7 @@ class DashboardService:
                     "decision": decision.to_dict(),
                     "market_data": market_data.to_dict(),
                     "risk": adapter.risk_snapshot(),
+                    "risk_gate": adapter.entry_risk_gate(identity["account"]),
                     "message": "Analysis-only path; no order capability was invoked.",
                 }
                 self.last_execution_result = result
@@ -634,6 +744,9 @@ class DashboardService:
                 self.client.disconnect()
 
     def stop_demo_execution(self) -> dict[str, Any]:
+        with self.lock:
+            self.demo_entries_enabled = False
+        health = self.demo_monitor.stop()
         with self.lock, self.client_lock:
             self.client.connect()
             try:
@@ -649,6 +762,8 @@ class DashboardService:
                 "new_entries_blocked": True,
                 "positions": list(positions),
                 "message": "New demo entries are blocked; existing positions were not closed.",
+                **self._execution_controls(),
+                "monitoring": health.to_dict(),
             }
             self.last_execution_result = result
             return result
@@ -656,7 +771,10 @@ class DashboardService:
     def execution_status(self) -> dict[str, Any]:
         with self.lock:
             if self.last_execution_result is not None:
-                return self.last_execution_result
+                controls = self._execution_controls()
+                if "risk_gate" in self.last_execution_result:
+                    controls["risk_gate"] = self.last_execution_result["risk_gate"]
+                return {**self.last_execution_result, **controls}
             persisted = self.store.execution_orders(limit=1)
             if persisted:
                 latest = persisted[0]
@@ -679,6 +797,7 @@ class DashboardService:
                         "updated_at": latest.get("updated_at"),
                     },
                     "message": "Persisted execution state restored from SQLite.",
+                    **self._execution_controls(),
                 }
             return {
                 "mode": SessionMode.DEMO_EXECUTION.value,
@@ -686,6 +805,7 @@ class DashboardService:
                 "stage": "IDLE",
                 "execution_enabled": False,
                 "message": "No demo-execution attempt has been started.",
+                **self._execution_controls(),
             }
 
     def trial_readiness(self) -> dict[str, Any]:
@@ -756,6 +876,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send(self.service.trial_readiness())
             if path == "/api/execution":
                 return self._send(self.service.execution_status())
+            if path == "/api/monitoring":
+                return self._send(self.service.monitoring_status())
             return self._send({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             LOGGER.exception("Dashboard request failed")
@@ -774,6 +896,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send(self.service.analyze_demo_execution())
             if path == "/api/session/stop-demo-execution":
                 return self._send(self.service.stop_demo_execution())
+            if path == "/api/monitoring/start":
+                return self._send(self.service.start_monitoring())
+            if path == "/api/monitoring/stop":
+                return self._send(self.service.stop_monitoring())
+            if path == "/api/monitoring/enable-entries":
+                return self._send(self.service.enable_demo_entries())
+            if path == "/api/monitoring/disable-entries":
+                return self._send(self.service.disable_demo_entries())
             if path == "/api/historical/audit":
                 return self._send(self.service.historical_audit())
             if path == "/api/historical/plan":
