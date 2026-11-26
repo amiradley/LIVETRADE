@@ -264,3 +264,19 @@ def test_market_data_validation_rejects_future_candles():
 
     with pytest.raises(MarketDataValidationError, match="future"):
         validate_decision_market_data("EURUSD", "M1", tick, candles, broker_time, captured)
+
+
+def test_decision_reports_effective_source_time_and_preserves_raw_label():
+    candles = tuple(
+        Candle("EURUSD", "M1", datetime(2026, 1, 1, 2, minute=index, tzinfo=timezone.utc), 1.1, 1.101, 1.099, 1.1005, 10)
+        for index in range(60)
+    )
+    analysis = TechnicalAnalyzer(minimum_history=50).analyze("EURUSD", "M1", candles, closed_only=True)
+    tick = Tick("EURUSD", candles[-1].time, 1.1, 1.1002, 1.1, 10)
+    effective = datetime(2026, 1, 1, 0, 58, tzinfo=timezone.utc)
+
+    decision = build_experimental_decision(analysis, tick, candles, source_candle_time=effective)
+
+    assert decision.source_candle_time == effective
+    assert decision.market_conditions["source_candle_time_raw"] == candles[-2].time.isoformat()
+    assert decision.market_conditions["source_candle_time_effective"] == effective.isoformat()

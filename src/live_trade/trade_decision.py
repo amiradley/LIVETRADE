@@ -54,9 +54,11 @@ def build_experimental_decision(
     analysis: TechnicalAnalysis,
     tick: Tick,
     candles: tuple[Candle, ...] | list[Candle],
+    source_candle_time: datetime | None = None,
 ) -> TradeDecision:
     analysis_time = analysis.analysis_time.astimezone(timezone.utc)
-    source_time = analysis.source_candle_time.astimezone(timezone.utc)
+    raw_source_time = analysis.source_candle_time.astimezone(timezone.utc)
+    source_time = (source_candle_time or analysis.source_candle_time).astimezone(timezone.utc)
     signal_seed = f"{analysis.symbol}|{analysis.timeframe}|{source_time.isoformat()}|{analysis.technical_score}"
     signal_id = f"signal_{hashlib.sha256(signal_seed.encode('utf-8')).hexdigest()[:24]}"
     indicators = dict(analysis.indicator_values)
@@ -74,6 +76,8 @@ def build_experimental_decision(
         "candle_count": len(candles),
         "data_quality": analysis.data_quality,
         "structure": structure.to_dict(),
+        "source_candle_time_raw": raw_source_time.isoformat(),
+        "source_candle_time_effective": source_time.isoformat(),
     }
     decision = "NO_TRADE"
     entry = stop_loss = take_profit = risk_reward = None

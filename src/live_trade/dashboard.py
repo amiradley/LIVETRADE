@@ -542,7 +542,9 @@ class DashboardService:
                     self.last_execution_result = result
                     return result
                 analysis = TechnicalAnalyzer(minimum_history=50).analyze(symbol, timeframe, candles, closed_only=True)
-                decision = build_experimental_decision(analysis, tick, candles)
+                decision = build_experimental_decision(
+                    analysis, tick, candles, source_candle_time=market_data.source_candle_effective_time
+                )
                 base = {
                     "mode": SessionMode.DEMO_EXECUTION.value,
                     "execution_enabled": False,
@@ -610,7 +612,9 @@ class DashboardService:
                     self.last_execution_result = result
                     return result
                 analysis = TechnicalAnalyzer(minimum_history=50).analyze(symbol, timeframe, candles, closed_only=True)
-                decision = build_experimental_decision(analysis, tick, candles)
+                decision = build_experimental_decision(
+                    analysis, tick, candles, source_candle_time=market_data.source_candle_effective_time
+                )
                 result = {
                     "mode": SessionMode.DEMO_EXECUTION.value,
                     "status": decision.decision,
