@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -82,8 +83,9 @@ def timestamp_presentation_context(broker_time: "BrokerTimeConfig") -> dict[str,
 
 def runtime_clock_fields(captured_at: datetime | None = None) -> dict[str, Any]:
     """Capture Python UTC and Windows-local clock values for timestamp diagnostics."""
-    utc = _aware(captured_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    local = datetime.now().astimezone()
+    epoch = captured_at.timestamp() if captured_at is not None else time.time()
+    utc = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    local = datetime.fromtimestamp(epoch).astimezone()
     return {
         "python_utc": utc.isoformat(),
         "windows_local": local.isoformat(),
