@@ -104,6 +104,8 @@ The research intelligence layer provides reproducible hypothesis records, bounde
 
 The live scanner records a symbol's capture time at that symbol's tick-retrieval boundary. It does not compare later symbol ticks with the start of a multi-symbol scan, which could otherwise create a false future-tick rejection. The strict future-timestamp guard remains fail-closed. The experimental per-trade budget is preserved as an existing setting; its legacy 4.0935 conversion differs from the persisted 4.1195 risk-limit reference and must be reconciled only through an explicitly approved configuration change.
 
+Decision records expose explicit qualification categories: `QUALIFIED`, `REJECTED — STRATEGY CONDITION`, `DEFERRED — INSUFFICIENT DATA`, and `DATA INVALID`. Account-risk and execution-safety blocks remain separate operational gates and are not relabeled as strategy rejections.
+
 ### DEMO risk limits and monitoring
 
 The approved DEMO loss limits are persisted in SQLite and remain separate from manual entry activation:

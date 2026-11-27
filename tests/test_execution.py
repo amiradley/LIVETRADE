@@ -242,6 +242,8 @@ def test_decision_schema_returns_no_trade_for_insufficient_history():
     assert decision.decision == "NO_TRADE"
     assert decision.label == "EXPERIMENTAL — UNVALIDATED"
     assert decision.entry is None
+    assert decision.qualification_status == "DEFERRED — INSUFFICIENT DATA"
+    assert decision.rejection_category == "DEFERRED — INSUFFICIENT DATA"
 
 
 def test_dashboard_demo_start_reports_permission_block_without_order(tmp_path):

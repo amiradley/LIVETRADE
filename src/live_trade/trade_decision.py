@@ -29,6 +29,8 @@ class TradeDecision:
     risk_reward: float | None
     invalidation: tuple[str, ...]
     confidence: float | None
+    qualification_status: str = "REJECTED — STRATEGY CONDITION"
+    rejection_category: str | None = "REJECTED — STRATEGY CONDITION"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -47,6 +49,8 @@ class TradeDecision:
             "risk_reward": self.risk_reward,
             "invalidation": list(self.invalidation),
             "confidence": self.confidence,
+            "qualification_status": self.qualification_status,
+            "rejection_category": self.rejection_category,
         }
 
 
@@ -82,10 +86,16 @@ def build_experimental_decision(
     decision = "NO_TRADE"
     entry = stop_loss = take_profit = risk_reward = None
     reasons: list[str] = []
+    qualification_status = "REJECTED — STRATEGY CONDITION"
+    rejection_category: str | None = qualification_status
     if analysis.data_quality != "OK":
         reasons.append("insufficient closed-candle history")
+        qualification_status = "DEFERRED — INSUFFICIENT DATA"
+        rejection_category = qualification_status
     elif score is None or atr_value is None or atr_value <= 0:
         reasons.append("indicators are unavailable or invalid")
+        qualification_status = "DATA INVALID"
+        rejection_category = qualification_status
     elif structure.direction == "BULLISH" and score >= 70:
         decision = "BUY"
         entry = tick.ask
@@ -93,6 +103,8 @@ def build_experimental_decision(
         take_profit = entry + 4.0 * atr_value
         risk_reward = 2.0
         reasons.append("bullish structure and technical score meet the exploratory threshold")
+        qualification_status = "QUALIFIED"
+        rejection_category = None
     elif structure.direction == "BEARISH" and score <= 30:
         decision = "SELL"
         entry = tick.bid
@@ -100,6 +112,8 @@ def build_experimental_decision(
         take_profit = entry - 4.0 * atr_value
         risk_reward = 2.0
         reasons.append("bearish structure and technical score meet the exploratory threshold")
+        qualification_status = "QUALIFIED"
+        rejection_category = None
     else:
         reasons.append("trend and score do not form a sufficiently aligned exploratory setup")
     invalidation = (
@@ -124,4 +138,6 @@ def build_experimental_decision(
         risk_reward=risk_reward,
         invalidation=invalidation,
         confidence=confidence,
+        qualification_status=qualification_status,
+        rejection_category=rejection_category,
     )

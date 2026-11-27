@@ -124,6 +124,8 @@ Research tables preserve hypotheses, experiments, backtest results, validation r
 
 The score is a research measurement, not a probability of profit and not an execution permission. Insufficient history, invalid OHLC values, NaN, and infinite values remain explicit data-quality failures. Technical records are deduplicated by symbol, timeframe, and source-candle timestamp.
 
+Decision outputs distinguish signal qualification from operational blocking: `QUALIFIED`, `REJECTED — STRATEGY CONDITION`, `DEFERRED — INSUFFICIENT DATA`, and `DATA INVALID` describe the research/market-data decision. Risk, account, and execution failures remain separate blocked stages so a safety rejection is never misreported as a strategy rejection.
+
 Confirmed analysis excludes the current forming MT5 candle by default and records `candle_scope=CLOSED`. Including the current candle requires the explicit `--include-live-candle` option and is labelled `INCLUDING_LIVE`; it is provisional and must not be treated as confirmed pattern evidence.
 
 ## Profit Allocation Manager — planned accounting boundary
