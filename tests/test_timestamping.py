@@ -8,6 +8,7 @@ from live_trade.timestamping import (
     BrokerTimeConfig,
     TimestampConfigurationError,
     broker_timestamp_fields,
+    runtime_clock_fields,
     utc_timestamp_fields,
 )
 
@@ -56,6 +57,15 @@ def test_unconfigured_broker_timestamp_does_not_silently_convert():
     assert fields["effective_utc"] is None
     assert fields["display"] is None
     assert fields["status"] == "UNCONFIGURED"
+
+
+def test_runtime_clock_diagnostic_records_python_utc_and_windows_local_time():
+    fields = runtime_clock_fields(datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    assert fields["python_utc"] == "2026-01-01T00:00:00+00:00"
+    assert fields["windows_local"]
+    assert "windows_timezone" in fields
+    assert "windows_utc_offset_seconds" in fields
 
 
 def test_unknown_broker_without_offset_fails_closed(monkeypatch):

@@ -30,7 +30,12 @@ from .storage_manager import StorageManager
 from .technical import TechnicalAnalyzer
 from .trade_decision import build_experimental_decision
 from .trial_readiness import build_trial_readiness
-from .timestamping import broker_timestamp_fields, timestamp_presentation_context, utc_timestamp_fields
+from .timestamping import (
+    broker_timestamp_fields,
+    runtime_clock_fields,
+    timestamp_presentation_context,
+    utc_timestamp_fields,
+)
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
@@ -124,6 +129,25 @@ def _history_payload(intelligence: FinancialIntelligenceSnapshot) -> dict[str, A
         "timestamp_context": timestamp_presentation_context(intelligence.broker_time)
         if intelligence.broker_time
         else None,
+    }
+
+
+def _timestamp_diagnostic(tick: Any, candles: list[Any], broker_time: Any, captured_at: datetime) -> dict[str, Any]:
+    raw_tick = tick.time.isoformat() if tick is not None else None
+    effective_tick = None
+    if tick is not None and broker_time.configured:
+        effective_tick = broker_time.effective_utc(tick.time).isoformat()
+    raw_candle = candles[-1].time.isoformat() if candles else None
+    effective_candle = None
+    if candles and broker_time.configured:
+        effective_candle = broker_time.effective_utc(candles[-1].time).isoformat()
+    return {
+        **runtime_clock_fields(captured_at),
+        "tick_raw_label": raw_tick,
+        "tick_effective_utc": effective_tick,
+        "latest_candle_raw_label": raw_candle,
+        "latest_candle_effective_utc": effective_candle,
+        "broker_time": broker_time.to_dict(),
     }
 
 
@@ -754,6 +778,7 @@ class DashboardService:
                         symbol, timeframe, tick, candles, self.settings.broker_time
                     )
                 except MarketDataValidationError as exc:
+                    captured_at = datetime.now(timezone.utc)
                     result = {
                         "mode": SessionMode.DEMO_EXECUTION.value,
                         "status": "BLOCKED",
@@ -765,11 +790,14 @@ class DashboardService:
                         "market_data": {
                             "symbol": symbol,
                             "timeframe": timeframe,
-                            "captured_at": datetime.now(timezone.utc).isoformat(),
+                            "captured_at": captured_at.isoformat(),
                             "timestamp_configuration": self.settings.broker_time.to_dict(),
                             "candle_count": len(candles),
                             "latest_candle_time": candles[-1].time.isoformat() if candles else None,
                         },
+                        "timestamp_diagnostic": _timestamp_diagnostic(
+                            tick, candles, self.settings.broker_time, captured_at
+                        ),
                     }
                     self.last_execution_result = result
                     return result
@@ -826,6 +854,7 @@ class DashboardService:
                         symbol, timeframe, tick, candles, self.settings.broker_time
                     )
                 except MarketDataValidationError as exc:
+                    captured_at = datetime.now(timezone.utc)
                     result = {
                         "mode": SessionMode.DEMO_EXECUTION.value,
                         "status": "BLOCKED",
@@ -837,11 +866,14 @@ class DashboardService:
                         "market_data": {
                             "symbol": symbol,
                             "timeframe": timeframe,
-                            "captured_at": datetime.now(timezone.utc).isoformat(),
+                            "captured_at": captured_at.isoformat(),
                             "timestamp_configuration": self.settings.broker_time.to_dict(),
                             "candle_count": len(candles),
                             "latest_candle_time": candles[-1].time.isoformat() if candles else None,
                         },
+                        "timestamp_diagnostic": _timestamp_diagnostic(
+                            tick, candles, self.settings.broker_time, captured_at
+                        ),
                         "message": "Analysis blocked; stale or inconsistent market data was not used.",
                     }
                     self.last_execution_result = result

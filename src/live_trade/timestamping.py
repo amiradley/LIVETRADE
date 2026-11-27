@@ -80,6 +80,18 @@ def timestamp_presentation_context(broker_time: "BrokerTimeConfig") -> dict[str,
     }
 
 
+def runtime_clock_fields(captured_at: datetime | None = None) -> dict[str, Any]:
+    """Capture Python UTC and Windows-local clock values for timestamp diagnostics."""
+    utc = _aware(captured_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    local = datetime.now().astimezone()
+    return {
+        "python_utc": utc.isoformat(),
+        "windows_local": local.isoformat(),
+        "windows_timezone": str(local.tzinfo),
+        "windows_utc_offset_seconds": local.utcoffset().total_seconds() if local.utcoffset() else None,
+    }
+
+
 @dataclass(frozen=True)
 class BrokerTimeConfig:
     """Audited broker-server-to-UTC interpretation for market timestamps."""
