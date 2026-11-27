@@ -773,12 +773,13 @@ class DashboardService:
                     return result
                 tick = self.client.get_tick(symbol)
                 candles = self.client.get_candles(symbol, timeframe, 100)
+                captured_at = datetime.now(timezone.utc)
                 try:
                     market_data = validate_decision_market_data(
-                        symbol, timeframe, tick, candles, self.settings.broker_time
+                        symbol, timeframe, tick, candles, self.settings.broker_time,
+                        captured_at=captured_at,
                     )
                 except MarketDataValidationError as exc:
-                    captured_at = datetime.now(timezone.utc)
                     result = {
                         "mode": SessionMode.DEMO_EXECUTION.value,
                         "status": "BLOCKED",
@@ -849,12 +850,13 @@ class DashboardService:
                 identity = adapter.verify_demo_identity()
                 tick = self.client.get_tick(symbol)
                 candles = self.client.get_candles(symbol, timeframe, 100)
+                captured_at = datetime.now(timezone.utc)
                 try:
                     market_data = validate_decision_market_data(
-                        symbol, timeframe, tick, candles, self.settings.broker_time
+                        symbol, timeframe, tick, candles, self.settings.broker_time,
+                        captured_at=captured_at,
                     )
                 except MarketDataValidationError as exc:
-                    captured_at = datetime.now(timezone.utc)
                     result = {
                         "mode": SessionMode.DEMO_EXECUTION.value,
                         "status": "BLOCKED",

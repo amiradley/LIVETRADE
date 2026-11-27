@@ -113,6 +113,7 @@ def _raw_datetime(value: Any) -> datetime:
 class ReadOnlyMt5Client:
     """Small adapter exposing only terminal and market-data reads."""
 
+    INITIALIZE_TIMEOUT_MS = 10_000
     TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
 
     def __init__(
@@ -128,6 +129,7 @@ class ReadOnlyMt5Client:
 
     def connect(self) -> None:
         kwargs = {"path": str(self.mt5_path)} if self.mt5_path else {}
+        kwargs["timeout"] = self.INITIALIZE_TIMEOUT_MS
         initialized = self.api.initialize(**kwargs)
         if not initialized:
             error = _record_to_dict(self.api.last_error())

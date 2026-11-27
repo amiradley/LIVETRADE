@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import time
 
 import pytest
 
@@ -73,3 +74,29 @@ def test_future_tick_requires_explicit_verified_server_offset(fake_mt5):
     assert accepted_result.timestamp_offset_seconds == 7200
     assert accepted_result.tick_time == datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
     assert accepted_result.effective_tick_time == captured_at
+
+
+def test_live_scan_captures_each_tick_at_retrieval_boundary(fake_mt5):
+    class Client(ReadOnlyMt5Client):
+        def __init__(self, api):
+            super().__init__(api=api)
+            self.calls = 0
+
+        def get_tick(self, symbol):
+            self.calls += 1
+            if self.calls == 2:
+                time.sleep(1.1)
+            return super().get_tick(symbol)
+
+    # This test exercises the live path (no explicit replay timestamp). The
+    # implementation must not compare the second symbol with scan start.
+    fake_mt5.tick_epoch = int(datetime.now(timezone.utc).timestamp())
+    client = Client(fake_mt5)
+    client.connect()
+    scan = MarketScanner(
+        client,
+        ScannerConfig(timeframes=("M1",), bars=1, max_tick_age_seconds=30,
+                      broker_server_utc_offset_seconds=0),
+    ).scan()
+
+    assert all("future_tick" not in result.reasons for result in scan.results)

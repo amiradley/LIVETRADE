@@ -248,9 +248,24 @@ class MarketScanner:
                 continue
             try:
                 tick = self.client.get_tick(symbol)
-                result = self._base_result(instrument, tick, started_at)
+                # A scan can cover many symbols.  Comparing every tick with the
+                # scan start time makes a current tick look future-dated when
+                # retrieval itself takes longer than the strict guard.  Use the
+                # explicit caller timestamp for deterministic tests/replays, and
+                # otherwise capture immediately after this symbol's tick read.
+                captured_for_tick = (
+                    started_at
+                    if captured_at is not None
+                    else datetime.now(timezone.utc)
+                )
+                result = self._base_result(instrument, tick, captured_for_tick)
             except Exception:
-                result = self._base_result(instrument, None, started_at, "tick_unavailable")
+                captured_for_tick = (
+                    started_at
+                    if captured_at is not None
+                    else datetime.now(timezone.utc)
+                )
+                result = self._base_result(instrument, None, captured_for_tick, "tick_unavailable")
             results.append(result)
 
         ranked = sorted(

@@ -60,6 +60,8 @@ The first scanner increment supports M1, M5, M15, M30, H1, H4, and D1 retrieval 
 
 Future-dated tick timestamps are intentionally rejected. MT5/broker server clock offsets must be measured and supplied as explicit, audited configuration before any offset-aware activation is allowed; the scanner must not silently reinterpret timestamps.
 
+For live multi-symbol scans, each tick is evaluated against the UTC capture instant immediately after that symbol's retrieval. The scan-start timestamp is retained as the run boundary, but is not used as the per-symbol freshness clock. This preserves the strict future-tick rejection while preventing request duration from manufacturing a future-tick result.
+
 The current MetaQuotes-Demo observation measured a stable two-hour offset: raw tick and M1 candle epochs both converted to UTC were two hours ahead of the Python UTC clock, while Windows local time was UTC+08:00. This is recorded as an auditable project default; the CLI override remains available for a separately verified terminal context. Scan records persist the offset, configuration state, and source used for interpretation.
 
 Financial history and position timestamps use the same boundary rule. The original MT5 broker label is retained in SQLite and exposed as `*_raw`; the audited server offset is applied once to produce `*_utc`; the dashboard/API `*_at` display value is then rendered in Malaysia time (`Asia/Kuala_Lumpur`, UTC+8). Python capture timestamps remain UTC with an explicit Malaysia display companion. An unconfigured broker never receives a silent timestamp conversion.
@@ -103,6 +105,8 @@ Stage 1.8C attaches a `ResourceMonitor` to collection sessions. It samples syste
 The first-demo reassessment adds a read-only trial-readiness projection. It reads actual historical rows, collection jobs, research experiments, validation outcomes, and strategy-version approvals, then reports a conservative lifecycle stage and explicit blockers. It does not infer execution capability from broker account flags: the read-only MT5 client exposes no order mutation API, so execution and operational risk gates remain blocked until a separately authorized implementation and verification phase.
 
 The minimum execution implementation is isolated in DemoOnlyExecutionAdapter and does not alter ReadOnlyMt5Client. It requires ACCOUNT_TRADE_MODE_DEMO, a demo server identity, connected terminal permissions, a protective stop, broker-compatible symbol volume, spread and risk checks, a unique signal, and post-submit position reconciliation. A rejected, timed-out, or unreconciled order is never reported as filled. The dashboard exposes a separate DEMO_EXECUTION route and panel; the existing DEMO_SHADOW START/STOP behavior is unchanged.
+
+Read-only MT5 initialization uses a finite 10-second timeout so a missing or unreachable terminal cannot leave a scanner or dashboard request hanging indefinitely.
 
 ## Stages 1.9–2.1 research intelligence
 

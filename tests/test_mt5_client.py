@@ -12,6 +12,7 @@ def test_read_only_client_reads_terminal_symbols_ticks_and_candles(fake_mt5):
     client.connect()
 
     assert fake_mt5.initialized is True
+    assert fake_mt5.initialize_kwargs["timeout"] == 10_000
     assert client.terminal_info()["name"] == "Fake MT5"
     assert len(client.discover_instruments()) == 2
     tick = client.get_tick("EURUSD")
