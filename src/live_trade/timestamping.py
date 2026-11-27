@@ -7,8 +7,77 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 
+MALAYSIA_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Kuala_Lumpur")
+MALAYSIA_TIMEZONE_NAME = "Asia/Kuala_Lumpur"
+
+
 class TimestampConfigurationError(ValueError):
     """Raised when broker time cannot be interpreted safely."""
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def broker_timestamp_fields(value: datetime | None, broker_time: "BrokerTimeConfig | None") -> dict[str, Any]:
+    """Return raw, effective UTC, and Malaysia presentation values.
+
+    The raw value remains the broker/server label captured from MT5. It is never
+    rewritten; only the effective and display representations apply the audited
+    broker offset at the presentation boundary.
+    """
+    if value is None:
+        return {
+            "raw": None,
+            "effective_utc": None,
+            "display": None,
+            "display_timezone": MALAYSIA_TIMEZONE_NAME,
+            "status": "UNAVAILABLE",
+        }
+    raw = _aware(value).isoformat()
+    if broker_time is None or not broker_time.configured:
+        return {
+            "raw": raw,
+            "effective_utc": None,
+            "display": None,
+            "display_timezone": MALAYSIA_TIMEZONE_NAME,
+            "status": "UNCONFIGURED",
+        }
+    effective = broker_time.effective_utc(value)
+    return {
+        "raw": raw,
+        "effective_utc": effective.isoformat(),
+        "display": effective.astimezone(MALAYSIA_TIMEZONE).isoformat(),
+        "display_timezone": MALAYSIA_TIMEZONE_NAME,
+        "status": "OK",
+    }
+
+
+def utc_timestamp_fields(value: datetime | None) -> dict[str, Any]:
+    """Return explicit UTC and Malaysia representations for Python timestamps."""
+    if value is None:
+        return {
+            "utc": None,
+            "display": None,
+            "display_timezone": MALAYSIA_TIMEZONE_NAME,
+            "status": "UNAVAILABLE",
+        }
+    utc = _aware(value).astimezone(timezone.utc)
+    return {
+        "utc": utc.isoformat(),
+        "display": utc.astimezone(MALAYSIA_TIMEZONE).isoformat(),
+        "display_timezone": MALAYSIA_TIMEZONE_NAME,
+        "status": "OK",
+    }
+
+
+def timestamp_presentation_context(broker_time: "BrokerTimeConfig") -> dict[str, Any]:
+    return {
+        "display_timezone": MALAYSIA_TIMEZONE_NAME,
+        "display_utc_offset_hours": 8,
+        "broker_time": broker_time.to_dict(),
+        "rule": "Raw MT5 broker labels are preserved; audited broker offset is applied once to derive effective UTC, then displayed in Malaysia time.",
+    }
 
 
 @dataclass(frozen=True)

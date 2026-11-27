@@ -6,6 +6,7 @@ from live_trade.accounting import aggregate_closed_trades, savings_preview
 from live_trade.intelligence import ExchangeRateService
 from live_trade.mt5_client import ReadOnlyMt5Client
 from live_trade.storage import MarketDataStore
+from live_trade.timestamping import BrokerTimeConfig
 
 
 def deal(ticket, entry, volume, price, profit, commission=-1.0, swap=-0.1, fee=-0.2):
@@ -40,6 +41,19 @@ def test_partial_closes_are_aggregated_with_all_costs():
     assert trades[0].swap == approx(-0.3)
     assert trades[0].fees == approx(-0.6)
     assert trades[0].net_profit == approx(96.1)
+
+
+def test_trade_display_time_uses_effective_broker_time_without_rewriting_raw_label():
+    trades = aggregate_closed_trades(
+        [deal(1, 0, 1.0, 1.1000, 0.0), deal(2, 1, 1.0, 1.1100, 100.0)]
+    )
+
+    rendered = trades[0].to_dict(BrokerTimeConfig.metaquotes_demo_default())
+
+    assert rendered["opened_at_raw"] == "2026-01-01T00:00:00+00:00"
+    assert rendered["opened_at_utc"] == "2025-12-31T22:00:00+00:00"
+    assert rendered["opened_at"] == "2026-01-01T06:00:00+08:00"
+    assert rendered["timestamp_status"] == "OK"
 
 
 def test_savings_preview_requires_recovery_above_high_water_mark():

@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from .accounting import HistoricalTrade, aggregate_closed_trades, performance_summary
+from .timestamping import BrokerTimeConfig, timestamp_presentation_context
 
 
 @dataclass(frozen=True)
@@ -91,23 +92,28 @@ class FinancialIntelligenceSnapshot:
     performance: Mapping[str, float | None]
     exchange_rate: ExchangeRate
     allocation: Mapping[str, Any]
+    broker_time: BrokerTimeConfig | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "history": [trade.to_dict() for trade in self.history],
+            "history": [trade.to_dict(self.broker_time) for trade in self.history],
             "raw_deal_count": self.raw_deal_count,
             "history_status": self.history_status,
             "history_error": self.history_error,
             "performance": dict(self.performance),
             "exchange_rate": self.exchange_rate.to_dict(),
             "allocation": dict(self.allocation),
+            "timestamp_context": timestamp_presentation_context(self.broker_time)
+            if self.broker_time
+            else None,
         }
 
 
 class FinancialIntelligenceService:
-    def __init__(self, store: Any, lookback_days: int = 365) -> None:
+    def __init__(self, store: Any, lookback_days: int = 365, broker_time: BrokerTimeConfig | None = None) -> None:
         self.store = store
         self.lookback_days = lookback_days
+        self.broker_time = broker_time
         self.exchange_rates = ExchangeRateService(store)
 
     def capture(self, client: Any, account_currency: str, captured_at: datetime | None = None) -> FinancialIntelligenceSnapshot:
@@ -154,4 +160,5 @@ class FinancialIntelligenceService:
             performance=performance,
             exchange_rate=exchange_rate,
             allocation=allocation,
+            broker_time=self.broker_time,
         )

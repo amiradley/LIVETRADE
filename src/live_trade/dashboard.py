@@ -30,6 +30,7 @@ from .storage_manager import StorageManager
 from .technical import TechnicalAnalyzer
 from .trade_decision import build_experimental_decision
 from .trial_readiness import build_trial_readiness
+from .timestamping import broker_timestamp_fields, timestamp_presentation_context, utc_timestamp_fields
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
@@ -66,8 +67,10 @@ def _converted_field(field: dict[str, Any], rate: Any, quote_currency: str = "MY
     }
 
 
-def _position_payload(position: Any, rate: Any) -> dict[str, Any]:
+def _position_payload(position: Any, rate: Any, broker_time: Any) -> dict[str, Any]:
     floating = _field(position.floating_pnl, "BROKER_VERIFIED", "MT5 positions_get")
+    opened = broker_timestamp_fields(position.opened_at, broker_time)
+    captured = utc_timestamp_fields(position.captured_at)
     return {
         "ticket": position.ticket,
         "symbol": position.symbol,
@@ -80,8 +83,12 @@ def _position_payload(position: Any, rate: Any) -> dict[str, Any]:
         "stop_loss": position.stop_loss,
         "take_profit": position.take_profit,
         "margin": position.margin,
-        "opened_at": _iso(position.opened_at),
-        "captured_at": _iso(position.captured_at),
+        "opened_at": opened["display"] if opened["status"] == "OK" else opened["raw"],
+        "opened_at_raw": opened["raw"],
+        "opened_at_utc": opened["effective_utc"],
+        "captured_at": captured["utc"],
+        "captured_at_display": captured["display"],
+        "display_timezone": opened["display_timezone"],
         "data_freshness": "LIVE",
         "currency_conversion": "UNAVAILABLE",
     }
@@ -95,7 +102,7 @@ def _history_payload(intelligence: FinancialIntelligenceSnapshot) -> dict[str, A
         "raw_deal_count": intelligence.raw_deal_count,
         "results": [
             {
-                **trade.to_dict(),
+                **trade.to_dict(intelligence.broker_time),
                 "net_profit_myr": _converted_field(
                     _field(trade.net_profit, "INTERNALLY_CALCULATED", "aggregated MT5 deal history"), rate
                 ),
@@ -114,6 +121,9 @@ def _history_payload(intelligence: FinancialIntelligenceSnapshot) -> dict[str, A
         },
         "exchange_rate": rate.to_dict(),
         "allocation": dict(intelligence.allocation),
+        "timestamp_context": timestamp_presentation_context(intelligence.broker_time)
+        if intelligence.broker_time
+        else None,
     }
 
 
@@ -121,6 +131,7 @@ def _snapshot_payload(
     snapshot: FinancialSnapshot,
     account: dict[str, Any],
     intelligence: FinancialIntelligenceSnapshot,
+    broker_time: Any,
 ) -> dict[str, Any]:
     rate = intelligence.exchange_rate
     balance = _field(snapshot.balance, "BROKER_VERIFIED", "MT5 account_info")
@@ -151,7 +162,7 @@ def _snapshot_payload(
         "free_margin": {**free_margin, "myr": _converted_field(free_margin, rate)},
         "margin_level": _field(account.get("margin_level"), "BROKER_VERIFIED", "MT5 account_info"),
         "floating_pnl": {**floating, "myr": _converted_field(floating, rate)},
-        "positions": [_position_payload(position, rate) for position in snapshot.positions],
+        "positions": [_position_payload(position, rate, broker_time) for position in snapshot.positions],
         "position_count": len(snapshot.positions),
         "data_quality": snapshot.data_quality,
         "currency_conversion": {
@@ -179,6 +190,7 @@ def _snapshot_payload(
             for name, value in intelligence.performance.items()
         },
         "savings_calculation": dict(allocation),
+        "timestamp_context": timestamp_presentation_context(broker_time),
     }
 
 
@@ -220,7 +232,7 @@ class DashboardService:
             self.client_lock,
             broker_time=settings.broker_time,
         )
-        self.intelligence = FinancialIntelligenceService(self.store)
+        self.intelligence = FinancialIntelligenceService(self.store, broker_time=settings.broker_time)
         self.controller = TradingSessionController(
             self.client,
             self.financial,
@@ -439,7 +451,7 @@ class DashboardService:
             snapshot = self.financial.capture()
             intelligence = self.intelligence.capture(self.client, str(account.get("currency") or "UNKNOWN"))
             snapshot_id = self.store.save_financial_snapshot(snapshot)
-            financial = _snapshot_payload(snapshot, account, intelligence)
+            financial = _snapshot_payload(snapshot, account, intelligence, self.settings.broker_time)
             payload = {
                 "connection": {
                     "status": "CONNECTED",
@@ -527,7 +539,7 @@ class DashboardService:
                 account = self.client.account_info() or {}
                 snapshot_id = self.store.save_financial_snapshot(status.financial)
                 intelligence = self.intelligence.capture(self.client, str(account.get("currency") or "UNKNOWN"))
-                payload = _snapshot_payload(status.financial, account, intelligence)
+                payload = _snapshot_payload(status.financial, account, intelligence, self.settings.broker_time)
                 self.last_successful = {
                     "connection": {"status": "CONNECTED", "broker_verified": True, "error": None},
                     "terminal": self.client.terminal_info(),

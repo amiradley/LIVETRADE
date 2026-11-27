@@ -62,6 +62,8 @@ Future-dated tick timestamps are intentionally rejected. MT5/broker server clock
 
 The current MetaQuotes-Demo observation measured a stable two-hour offset: raw tick and M1 candle epochs both converted to UTC were two hours ahead of the Python UTC clock, while Windows local time was UTC+08:00. This is recorded as an auditable project default; the CLI override remains available for a separately verified terminal context. Scan records persist the offset, configuration state, and source used for interpretation.
 
+Financial history and position timestamps use the same boundary rule. The original MT5 broker label is retained in SQLite and exposed as `*_raw`; the audited server offset is applied once to produce `*_utc`; the dashboard/API `*_at` display value is then rendered in Malaysia time (`Asia/Kuala_Lumpur`, UTC+8). Python capture timestamps remain UTC with an explicit Malaysia display companion. An unconfigured broker never receives a silent timestamp conversion.
+
 The Storage Manager is a dry-run-only project health and retention report. It reports disk thresholds at 70%, 85%, and 90%, protects the database and application files, and classifies temporary, diagnostic, archive, and unclassified files for review. `python -m live_trade storage` and the dashboard Storage Manager page never delete files; every scan is appended to the storage audit log.
 
 ## Stage 1.7 historical data foundation

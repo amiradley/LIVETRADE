@@ -4,7 +4,12 @@ from live_trade.mt5_client import ReadOnlyMt5Client
 from live_trade.research import ResearchWorker
 from live_trade.scanner import MarketScanner, ScannerConfig
 from live_trade.storage import MarketDataStore
-from live_trade.timestamping import BrokerTimeConfig, TimestampConfigurationError
+from live_trade.timestamping import (
+    BrokerTimeConfig,
+    TimestampConfigurationError,
+    broker_timestamp_fields,
+    utc_timestamp_fields,
+)
 
 
 def test_metaquotes_demo_configuration_is_explicit_and_audited():
@@ -18,6 +23,39 @@ def test_metaquotes_demo_configuration_is_explicit_and_audited():
     assert config.effective_utc(datetime(2026, 1, 1, 2, tzinfo=timezone.utc)) == datetime(
         2026, 1, 1, tzinfo=timezone.utc
     )
+
+
+def test_broker_timestamp_presentation_preserves_raw_and_applies_offset_once():
+    config = BrokerTimeConfig.metaquotes_demo_default()
+    raw = datetime(2026, 11, 26, 11, 13, 51, tzinfo=timezone.utc)
+
+    fields = broker_timestamp_fields(raw, config)
+
+    assert fields["raw"] == "2026-11-26T11:13:51+00:00"
+    assert fields["effective_utc"] == "2026-11-26T09:13:51+00:00"
+    assert fields["display"] == "2026-11-26T17:13:51+08:00"
+    assert fields["display_timezone"] == "Asia/Kuala_Lumpur"
+    assert fields["status"] == "OK"
+
+
+def test_malaysia_display_offset_is_stable_across_calendar_seasons():
+    january = utc_timestamp_fields(datetime(2026, 1, 1, 0, tzinfo=timezone.utc))
+    july = utc_timestamp_fields(datetime(2026, 7, 1, 0, tzinfo=timezone.utc))
+
+    assert january["display"] == "2026-01-01T08:00:00+08:00"
+    assert july["display"] == "2026-07-01T08:00:00+08:00"
+
+
+def test_unconfigured_broker_timestamp_does_not_silently_convert():
+    fields = broker_timestamp_fields(
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        BrokerTimeConfig("Unknown", None, "missing", None),
+    )
+
+    assert fields["raw"] == "2026-01-01T00:00:00+00:00"
+    assert fields["effective_utc"] is None
+    assert fields["display"] is None
+    assert fields["status"] == "UNCONFIGURED"
 
 
 def test_unknown_broker_without_offset_fails_closed(monkeypatch):

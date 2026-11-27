@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
+from .timestamping import BrokerTimeConfig, broker_timestamp_fields
+
 
 def _utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -85,14 +87,22 @@ class HistoricalTrade:
     deal_ids: tuple[int, ...]
     data_quality: str
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, broker_time: BrokerTimeConfig | None = None) -> dict[str, Any]:
+        opened = broker_timestamp_fields(self.opened_at, broker_time)
+        closed = broker_timestamp_fields(self.closed_at, broker_time)
         return {
             "position_id": self.position_id,
             "symbol": self.symbol,
             "side": self.side,
             "volume": self.volume,
-            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
-            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
+            "opened_at": opened["display"] if opened["status"] == "OK" else opened["raw"],
+            "closed_at": closed["display"] if closed["status"] == "OK" else closed["raw"],
+            "opened_at_raw": opened["raw"],
+            "opened_at_utc": opened["effective_utc"],
+            "closed_at_raw": closed["raw"],
+            "closed_at_utc": closed["effective_utc"],
+            "timestamp_status": "OK" if opened["status"] == closed["status"] == "OK" else "UNCONFIGURED",
+            "display_timezone": opened["display_timezone"],
             "entry_price": self.entry_price,
             "exit_price": self.exit_price,
             "gross_profit": self.gross_profit,
